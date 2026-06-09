@@ -147,34 +147,36 @@ Completion checks:
 
 Status note: Phase 3 completed with default and all-feature workspace tests passing. Message lifecycle, inline/heap owned storage, zero-copy shared callback ownership, copy/move, MORE flag, routing id, group, metadata lookup, init_buffer, and message oracle comparison are covered. The C ABI uses a 64-byte handle-backed opaque representation documented in `docs/message-abi.md`; future performance work may revisit handle indirection if needed.
 
-## Phase 4: Context, Options, Socket Shell [~]
+## Phase 4: Context, Options, Socket Shell [x]
 
 Goal: implement lifecycle and option semantics before real transports.
 
-- [ ] Implement context state machine.
-- [ ] Implement context shutdown behavior.
-- [ ] Implement context termination behavior.
-- [ ] Implement legacy `zmq_init`.
-- [ ] Implement legacy `zmq_term`.
-- [ ] Implement legacy `zmq_ctx_destroy`.
-- [ ] Implement context options.
-- [ ] Implement socket options defaults.
-- [ ] Implement socket option validation.
-- [ ] Implement socket factory for all stable socket types.
-- [ ] Implement socket factory for all draft socket types.
-- [ ] Implement invalid option errno behavior.
-- [ ] Implement invalid option size errno behavior.
-- [ ] Implement Rust-native option API.
+- [x] Implement context state machine.
+- [x] Implement context shutdown behavior.
+- [x] Implement context termination behavior.
+- [x] Implement legacy `zmq_init`.
+- [x] Implement legacy `zmq_term`.
+- [x] Implement legacy `zmq_ctx_destroy`.
+- [x] Implement context options.
+- [x] Implement socket options defaults.
+- [x] Implement socket option validation.
+- [x] Implement socket factory for all stable socket types.
+- [x] Implement socket factory for all draft socket types.
+- [x] Implement invalid option errno behavior.
+- [x] Implement invalid option size errno behavior.
+- [x] Implement Rust-native option API.
 
 Completion checks:
 
-- [ ] `cargo fmt --all`
-- [ ] `cargo test --workspace`
-- [ ] Context lifecycle tests pass.
-- [ ] Socket creation tests pass for stable and draft types.
-- [ ] Option tests pass for defaults, valid values, invalid values, and invalid sizes.
+- [x] `cargo fmt --all`
+- [x] `cargo test --workspace`
+- [x] Context lifecycle tests pass.
+- [x] Socket creation tests pass for stable and draft types.
+- [x] Option tests pass for defaults, valid values, invalid values, and invalid sizes.
 
-## Phase 5: Pipe, Mailbox, Inproc [ ]
+Status note: Phase 4 completed with default and all-feature workspace tests passing. Context options and basic socket integer options are implemented for both Rust-native and C ABI callers. Socket creation covers stable and draft socket type values; transport behavior remains intentionally unimplemented until later phases.
+
+## Phase 5: Pipe, Mailbox, Inproc [~]
 
 Goal: implement the first real messaging path without OS networking.
 

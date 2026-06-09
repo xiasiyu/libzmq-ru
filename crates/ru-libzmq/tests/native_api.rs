@@ -1,4 +1,7 @@
-use ru_libzmq::{version, Context, Error, Message, SocketType};
+use ru_libzmq::{
+    version, Context, Error, Message, SocketType, ZMQ_IO_THREADS, ZMQ_LINGER, ZMQ_MAX_SOCKETS,
+    ZMQ_RCVHWM, ZMQ_SNDHWM, ZMQ_TYPE,
+};
 
 #[test]
 fn native_version_matches_c_abi_contract() {
@@ -92,4 +95,36 @@ fn native_context_termination_blocks_later_socket_creation() {
         ctx.socket(SocketType::Pair).map(|_| ()),
         Err(Error::Terminated)
     );
+}
+
+#[test]
+fn native_context_options_round_trip() {
+    let ctx = Context::new().unwrap();
+
+    assert_eq!(ctx.get_option_i32(ZMQ_IO_THREADS).unwrap(), 1);
+    assert_eq!(ctx.get_option_i32(ZMQ_MAX_SOCKETS).unwrap(), 1023);
+    ctx.set_option_i32(ZMQ_IO_THREADS, 2).unwrap();
+    ctx.set_option_i32(ZMQ_MAX_SOCKETS, 2048).unwrap();
+    assert_eq!(ctx.get_option_i32(ZMQ_IO_THREADS).unwrap(), 2);
+    assert_eq!(ctx.get_option_i32(ZMQ_MAX_SOCKETS).unwrap(), 2048);
+}
+
+#[test]
+fn native_socket_options_round_trip() {
+    let ctx = Context::new().unwrap();
+    let socket = ctx.socket(SocketType::Req).unwrap();
+
+    assert_eq!(
+        socket.get_option_i32(ZMQ_TYPE).unwrap(),
+        SocketType::Req as i32
+    );
+    assert_eq!(socket.get_option_i32(ZMQ_LINGER).unwrap(), -1);
+    assert_eq!(socket.get_option_i32(ZMQ_SNDHWM).unwrap(), 1000);
+    assert_eq!(socket.get_option_i32(ZMQ_RCVHWM).unwrap(), 1000);
+    socket.set_option_i32(ZMQ_LINGER, 0).unwrap();
+    socket.set_option_i32(ZMQ_SNDHWM, 10).unwrap();
+    socket.set_option_i32(ZMQ_RCVHWM, 11).unwrap();
+    assert_eq!(socket.get_option_i32(ZMQ_LINGER).unwrap(), 0);
+    assert_eq!(socket.get_option_i32(ZMQ_SNDHWM).unwrap(), 10);
+    assert_eq!(socket.get_option_i32(ZMQ_RCVHWM).unwrap(), 11);
 }

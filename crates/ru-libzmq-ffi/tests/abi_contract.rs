@@ -13,6 +13,12 @@ const EFAULT: c_int = 14;
 const EINVAL: c_int = 22;
 const ZMQ_PAIR: c_int = 0;
 const ZMQ_MORE: c_int = 1;
+const ZMQ_IO_THREADS: c_int = 1;
+const ZMQ_MAX_SOCKETS: c_int = 2;
+const ZMQ_TYPE: c_int = 16;
+const ZMQ_LINGER: c_int = 17;
+const ZMQ_SNDHWM: c_int = 23;
+const ZMQ_RCVHWM: c_int = 24;
 
 static FREE_CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -213,6 +219,116 @@ fn unimplemented_socket_operations_return_explicit_error() {
 
     assert_eq!(zmq_send(socket, ptr::null(), 0, 0), -1);
     assert_eq!(zmq_errno(), ENOTSUP);
+
+    assert_eq!(zmq_close(socket), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn context_options_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+
+    assert_eq!(zmq_ctx_get(ctx, ZMQ_IO_THREADS), 1);
+    assert_eq!(zmq_ctx_set(ctx, ZMQ_IO_THREADS, 2), 0);
+    assert_eq!(zmq_ctx_get(ctx, ZMQ_IO_THREADS), 2);
+    assert_eq!(zmq_ctx_set(ctx, ZMQ_MAX_SOCKETS, 2048), 0);
+    assert_eq!(zmq_ctx_get(ctx, ZMQ_MAX_SOCKETS), 2048);
+    assert_eq!(zmq_ctx_set(ctx, ZMQ_IO_THREADS, -1), -1);
+    assert_eq!(zmq_errno(), EINVAL);
+
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn socket_options_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let socket = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!socket.is_null());
+
+    let mut value = 0;
+    let mut size = size_of::<c_int>();
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_TYPE,
+            (&mut value as *mut c_int).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(value, ZMQ_PAIR);
+    assert_eq!(size, size_of::<c_int>());
+
+    value = 0;
+    size = size_of::<c_int>();
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_LINGER,
+            (&mut value as *mut c_int).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(value, -1);
+
+    value = 10;
+    assert_eq!(
+        zmq_setsockopt(
+            socket,
+            ZMQ_SNDHWM,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    value = 11;
+    assert_eq!(
+        zmq_setsockopt(
+            socket,
+            ZMQ_RCVHWM,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+
+    value = 0;
+    size = size_of::<c_int>();
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_SNDHWM,
+            (&mut value as *mut c_int).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(value, 10);
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_RCVHWM,
+            (&mut value as *mut c_int).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(value, 11);
+
+    value = -1;
+    assert_eq!(
+        zmq_setsockopt(
+            socket,
+            ZMQ_SNDHWM,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
 
     assert_eq!(zmq_close(socket), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);

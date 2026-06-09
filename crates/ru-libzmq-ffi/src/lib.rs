@@ -362,18 +362,24 @@ pub extern "C" fn zmq_ctx_shutdown(ctx: *mut c_void) -> c_int {
 
 #[no_mangle]
 pub extern "C" fn zmq_ctx_set(ctx: *mut c_void, _option: c_int, _optval: c_int) -> c_int {
-    if let Err(error) = context_from_raw(ctx) {
-        return set_error(error);
+    match context_from_raw(ctx).and_then(|ctx| ctx.inner.set_option(_option, _optval)) {
+        Ok(()) => {
+            clear_errno();
+            0
+        }
+        Err(error) => set_error(error),
     }
-    set_error(Error::NotImplemented("zmq_ctx_set"))
 }
 
 #[no_mangle]
 pub extern "C" fn zmq_ctx_get(ctx: *mut c_void, _option: c_int) -> c_int {
-    if let Err(error) = context_from_raw(ctx) {
-        return set_error(error);
+    match context_from_raw(ctx).and_then(|ctx| ctx.inner.get_option(_option)) {
+        Ok(value) => {
+            clear_errno();
+            value
+        }
+        Err(error) => set_error(error),
     }
-    set_error(Error::NotImplemented("zmq_ctx_get"))
 }
 
 #[no_mangle]
@@ -734,27 +740,59 @@ pub extern "C" fn zmq_recv(
 #[no_mangle]
 pub extern "C" fn zmq_setsockopt(
     socket: *mut c_void,
-    _option: c_int,
-    _optval: *const c_void,
-    _optvallen: usize,
+    option: c_int,
+    optval: *const c_void,
+    optvallen: usize,
 ) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    if optval.is_null() || optvallen != std::mem::size_of::<c_int>() {
+        return set_error(Error::InvalidArgument);
     }
-    unsupported_int("zmq_setsockopt")
+    // SAFETY: `optval` was checked non-null and `optvallen` matches `c_int` size.
+    let value = unsafe { *(optval.cast::<c_int>()) };
+    match socket.inner.set_option_i32(option, value) {
+        Ok(()) => {
+            clear_errno();
+            0
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn zmq_getsockopt(
     socket: *mut c_void,
-    _option: c_int,
-    _optval: *mut c_void,
-    _optvallen: *mut usize,
+    option: c_int,
+    optval: *mut c_void,
+    optvallen: *mut usize,
 ) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    if optval.is_null() || optvallen.is_null() {
+        return set_error(Error::InvalidArgument);
     }
-    unsupported_int("zmq_getsockopt")
+    // SAFETY: `optvallen` is non-null and points to caller-provided storage.
+    let available = unsafe { *optvallen };
+    if available < std::mem::size_of::<c_int>() {
+        return set_error(Error::InvalidArgument);
+    }
+    match socket.inner.get_option_i32(option) {
+        Ok(value) => {
+            // SAFETY: `optval` and `optvallen` are non-null; caller supplied enough space for `c_int`.
+            unsafe {
+                *(optval.cast::<c_int>()) = value;
+                *optvallen = std::mem::size_of::<c_int>();
+            }
+            clear_errno();
+            0
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
@@ -1012,27 +1050,51 @@ pub extern "C" fn zmq_threadclose(_thread: *mut c_void) {
 #[no_mangle]
 pub extern "C" fn zmq_ctx_set_ext(
     ctx: *mut c_void,
-    _option: c_int,
-    _optval: *const c_void,
-    _optvallen: usize,
+    option: c_int,
+    optval: *const c_void,
+    optvallen: usize,
 ) -> c_int {
-    if let Err(error) = context_from_raw(ctx) {
-        return set_error(error);
+    if optval.is_null() || optvallen != std::mem::size_of::<c_int>() {
+        return set_error(Error::InvalidArgument);
     }
-    unsupported_int("zmq_ctx_set_ext")
+    // SAFETY: `optval` was checked non-null and `optvallen` matches `c_int` size.
+    let value = unsafe { *(optval.cast::<c_int>()) };
+    match context_from_raw(ctx).and_then(|ctx| ctx.inner.set_option(option, value)) {
+        Ok(()) => {
+            clear_errno();
+            0
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn zmq_ctx_get_ext(
     ctx: *mut c_void,
-    _option: c_int,
-    _optval: *mut c_void,
-    _optvallen: *mut usize,
+    option: c_int,
+    optval: *mut c_void,
+    optvallen: *mut usize,
 ) -> c_int {
-    if let Err(error) = context_from_raw(ctx) {
-        return set_error(error);
+    if optval.is_null() || optvallen.is_null() {
+        return set_error(Error::InvalidArgument);
     }
-    unsupported_int("zmq_ctx_get_ext")
+    // SAFETY: `optvallen` is non-null and points to caller-provided storage.
+    let available = unsafe { *optvallen };
+    if available < std::mem::size_of::<c_int>() {
+        return set_error(Error::InvalidArgument);
+    }
+    match context_from_raw(ctx).and_then(|ctx| ctx.inner.get_option(option)) {
+        Ok(value) => {
+            // SAFETY: `optval` and `optvallen` are non-null; caller supplied enough space for `c_int`.
+            unsafe {
+                *(optval.cast::<c_int>()) = value;
+                *optvallen = std::mem::size_of::<c_int>();
+            }
+            clear_errno();
+            0
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]

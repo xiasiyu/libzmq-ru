@@ -1,4 +1,4 @@
-pub use ru_libzmq_core::{Error, Message, Result, SocketType};
+pub use ru_libzmq_core::{constants::*, Error, Message, Result, SocketType};
 
 pub struct Context {
     inner: ru_libzmq_core::Context,
@@ -23,6 +23,14 @@ impl Context {
 
     pub fn terminate(&self) -> Result<()> {
         self.inner.terminate()
+    }
+
+    pub fn set_option_i32(&self, option: i32, value: i32) -> Result<()> {
+        self.inner.set_option(option, value)
+    }
+
+    pub fn get_option_i32(&self, option: i32) -> Result<i32> {
+        self.inner.get_option(option)
     }
 }
 
@@ -52,6 +60,14 @@ impl Socket {
 
     pub fn recv(&self) -> Result<Message> {
         self.inner.recv(0)
+    }
+
+    pub fn set_option_i32(&self, option: i32, value: i32) -> Result<()> {
+        self.inner.set_option_i32(option, value)
+    }
+
+    pub fn get_option_i32(&self, option: i32) -> Result<i32> {
+        self.inner.get_option_i32(option)
     }
 }
 

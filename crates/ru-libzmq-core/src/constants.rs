@@ -58,3 +58,32 @@ pub const ZMQ_MORE: i32 = 1;
 pub const ZMQ_SRCFD: i32 = 2;
 pub const ZMQ_SHARED: i32 = 3;
 pub const ZMQ_GROUP_MAX_LENGTH: i32 = 255;
+
+pub const ZMQ_IO_THREADS: i32 = 1;
+pub const ZMQ_MAX_SOCKETS: i32 = 2;
+pub const ZMQ_SOCKET_LIMIT: i32 = 3;
+pub const ZMQ_THREAD_PRIORITY: i32 = 3;
+pub const ZMQ_THREAD_SCHED_POLICY: i32 = 4;
+pub const ZMQ_MAX_MSGSZ: i32 = 5;
+pub const ZMQ_MSG_T_SIZE: i32 = 6;
+pub const ZMQ_THREAD_AFFINITY_CPU_ADD: i32 = 7;
+pub const ZMQ_THREAD_AFFINITY_CPU_REMOVE: i32 = 8;
+pub const ZMQ_THREAD_NAME_PREFIX: i32 = 9;
+pub const ZMQ_ZERO_COPY_RECV: i32 = 10;
+
+pub const ZMQ_IO_THREADS_DFLT: i32 = 1;
+pub const ZMQ_MAX_SOCKETS_DFLT: i32 = 1023;
+pub const ZMQ_THREAD_PRIORITY_DFLT: i32 = -1;
+pub const ZMQ_THREAD_SCHED_POLICY_DFLT: i32 = -1;
+
+pub const ZMQ_ROUTING_ID: i32 = 5;
+pub const ZMQ_SUBSCRIBE: i32 = 6;
+pub const ZMQ_UNSUBSCRIBE: i32 = 7;
+pub const ZMQ_RCVMORE: i32 = 13;
+pub const ZMQ_TYPE: i32 = 16;
+pub const ZMQ_LINGER: i32 = 17;
+pub const ZMQ_SNDHWM: i32 = 23;
+pub const ZMQ_RCVHWM: i32 = 24;
+pub const ZMQ_RCVTIMEO: i32 = 27;
+pub const ZMQ_SNDTIMEO: i32 = 28;
+pub const ZMQ_THREAD_SAFE: i32 = 81;

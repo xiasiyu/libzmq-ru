@@ -1,6 +1,7 @@
 use crate::constants::*;
 use crate::{Error, Message, Result};
 use std::convert::TryFrom;
+use std::sync::Mutex;
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,11 +64,37 @@ impl TryFrom<i32> for SocketType {
 pub struct Socket {
     id: usize,
     socket_type: SocketType,
+    options: Mutex<SocketOptions>,
+}
+
+#[derive(Debug, Clone)]
+struct SocketOptions {
+    linger: i32,
+    sndhwm: i32,
+    rcvhwm: i32,
+    sndtimeo: i32,
+    rcvtimeo: i32,
+}
+
+impl Default for SocketOptions {
+    fn default() -> Self {
+        Self {
+            linger: -1,
+            sndhwm: 1000,
+            rcvhwm: 1000,
+            sndtimeo: -1,
+            rcvtimeo: -1,
+        }
+    }
 }
 
 impl Socket {
     pub(crate) fn new(id: usize, socket_type: SocketType) -> Self {
-        Self { id, socket_type }
+        Self {
+            id,
+            socket_type,
+            options: Mutex::new(SocketOptions::default()),
+        }
     }
 
     pub fn id(&self) -> usize {
@@ -92,5 +119,36 @@ impl Socket {
 
     pub fn recv(&self, _flags: i32) -> Result<Message> {
         Err(Error::NotImplemented("socket recv"))
+    }
+
+    pub fn set_option_i32(&self, option: i32, value: i32) -> Result<()> {
+        let mut options = self.options.lock().map_err(|_| Error::InvalidSocket)?;
+        match option {
+            ZMQ_LINGER => options.linger = value,
+            ZMQ_SNDHWM if value >= 0 => options.sndhwm = value,
+            ZMQ_RCVHWM if value >= 0 => options.rcvhwm = value,
+            ZMQ_SNDTIMEO if value >= -1 => options.sndtimeo = value,
+            ZMQ_RCVTIMEO if value >= -1 => options.rcvtimeo = value,
+            ZMQ_SNDHWM | ZMQ_RCVHWM | ZMQ_SNDTIMEO | ZMQ_RCVTIMEO => {
+                return Err(Error::InvalidArgument)
+            }
+            _ => return Err(Error::InvalidArgument),
+        }
+        Ok(())
+    }
+
+    pub fn get_option_i32(&self, option: i32) -> Result<i32> {
+        let options = self.options.lock().map_err(|_| Error::InvalidSocket)?;
+        match option {
+            ZMQ_TYPE => Ok(self.socket_type as i32),
+            ZMQ_LINGER => Ok(options.linger),
+            ZMQ_SNDHWM => Ok(options.sndhwm),
+            ZMQ_RCVHWM => Ok(options.rcvhwm),
+            ZMQ_SNDTIMEO => Ok(options.sndtimeo),
+            ZMQ_RCVTIMEO => Ok(options.rcvtimeo),
+            ZMQ_RCVMORE => Ok(0),
+            ZMQ_THREAD_SAFE => Ok(0),
+            _ => Err(Error::InvalidArgument),
+        }
     }
 }
