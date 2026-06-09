@@ -212,15 +212,17 @@ impl FfiMessageInner {
         };
         let mut message = Message::from_vec(data);
         message.set_more(self.more);
+        message.set_routing_id(self.routing_id);
         Ok(message)
     }
 
     fn from_core_message(message: Message) -> Self {
         let more = message.more();
+        let routing_id = message.routing_id();
         Self {
             storage: MessageStorage::Owned(message),
             more,
-            routing_id: 0,
+            routing_id,
             group: None,
             metadata: Vec::new(),
         }
@@ -815,6 +817,47 @@ pub extern "C" fn zmq_setsockopt(
         Ok(socket) => socket,
         Err(error) => return set_error(error),
     };
+    if matches!(option, ZMQ_SUBSCRIBE | ZMQ_UNSUBSCRIBE) {
+        if optval.is_null() && optvallen != 0 {
+            return set_error(Error::InvalidArgument);
+        }
+        let prefix = if optvallen == 0 {
+            &[][..]
+        } else {
+            // SAFETY: `optval` was checked non-null for non-zero `optvallen` and is read-only.
+            unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), optvallen) }
+        };
+        let result = if option == ZMQ_SUBSCRIBE {
+            socket.inner.subscribe(prefix)
+        } else {
+            socket.inner.unsubscribe(prefix)
+        };
+        return match result {
+            Ok(()) => {
+                clear_errno();
+                0
+            }
+            Err(error) => set_error(error),
+        };
+    }
+    if option == ZMQ_XPUB_WELCOME_MSG {
+        if optval.is_null() && optvallen != 0 {
+            return set_error(Error::InvalidArgument);
+        }
+        let value = if optvallen == 0 {
+            &[][..]
+        } else {
+            // SAFETY: `optval` was checked non-null for non-zero `optvallen` and is read-only.
+            unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), optvallen) }
+        };
+        return match socket.inner.set_option_bytes(option, value) {
+            Ok(()) => {
+                clear_errno();
+                0
+            }
+            Err(error) => set_error(error),
+        };
+    }
     if optval.is_null() || optvallen != std::mem::size_of::<c_int>() {
         return set_error(Error::InvalidArgument);
     }

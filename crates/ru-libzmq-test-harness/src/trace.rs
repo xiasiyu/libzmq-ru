@@ -10,6 +10,11 @@ pub enum Operation {
     Version,
     ContextNew,
     SocketNew { socket_type: i32 },
+    Bind { endpoint: &'static str },
+    Connect { endpoint: &'static str },
+    Subscribe { prefix: &'static str },
+    Send { size: usize },
+    Recv,
     ContextTerm,
 }
 
@@ -19,6 +24,7 @@ pub enum Observation {
     Pointer { is_null: bool },
     ReturnCode { rc: i32 },
     Errno { errno: i32 },
+    Message { data: String, routing_id: u32 },
 }
 
 impl TraceCase {
@@ -43,6 +49,26 @@ impl Operation {
             Self::SocketNew { socket_type } => {
                 format!("{{\"type\":\"socket_new\",\"socket_type\":{socket_type}}}")
             }
+            Self::Bind { endpoint } => {
+                format!(
+                    "{{\"type\":\"bind\",\"endpoint\":\"{}\"}}",
+                    escape(endpoint)
+                )
+            }
+            Self::Connect { endpoint } => {
+                format!(
+                    "{{\"type\":\"connect\",\"endpoint\":\"{}\"}}",
+                    escape(endpoint)
+                )
+            }
+            Self::Subscribe { prefix } => {
+                format!(
+                    "{{\"type\":\"subscribe\",\"prefix\":\"{}\"}}",
+                    escape(prefix)
+                )
+            }
+            Self::Send { size } => format!("{{\"type\":\"send\",\"size\":{size}}}"),
+            Self::Recv => "{\"type\":\"recv\"}".to_string(),
             Self::ContextTerm => "{\"type\":\"context_term\"}".to_string(),
         }
     }
@@ -63,6 +89,12 @@ impl Observation {
             }
             Self::ReturnCode { rc } => format!("{{\"type\":\"return_code\",\"rc\":{rc}}}"),
             Self::Errno { errno } => format!("{{\"type\":\"errno\",\"errno\":{errno}}}"),
+            Self::Message { data, routing_id } => {
+                format!(
+                    "{{\"type\":\"message\",\"data\":\"{}\",\"routing_id\":{routing_id}}}",
+                    escape(data)
+                )
+            }
         }
     }
 }

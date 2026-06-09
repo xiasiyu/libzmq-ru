@@ -59,6 +59,14 @@ impl Socket {
         self.inner.disconnect(endpoint)
     }
 
+    pub fn subscribe(&self, prefix: &[u8]) -> Result<()> {
+        self.inner.subscribe(prefix)
+    }
+
+    pub fn unsubscribe(&self, prefix: &[u8]) -> Result<()> {
+        self.inner.unsubscribe(prefix)
+    }
+
     pub fn send<M>(&self, message: M) -> Result<usize>
     where
         M: Into<Message>,
@@ -79,6 +87,10 @@ impl Socket {
 
     pub fn set_option_i32(&self, option: i32, value: i32) -> Result<()> {
         self.inner.set_option_i32(option, value)
+    }
+
+    pub fn set_option_bytes(&self, option: i32, value: &[u8]) -> Result<()> {
+        self.inner.set_option_bytes(option, value)
     }
 
     pub fn get_option_i32(&self, option: i32) -> Result<i32> {

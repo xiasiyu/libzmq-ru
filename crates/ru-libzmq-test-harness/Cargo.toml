@@ -23,6 +23,18 @@ path = "src/bin/rust_message_oracle.rs"
 name = "compare-message-oracles"
 path = "src/bin/compare_message_oracles.rs"
 
+[[bin]]
+name = "cpp-stable-oracle"
+path = "src/bin/cpp_stable_oracle.rs"
+
+[[bin]]
+name = "rust-stable-oracle"
+path = "src/bin/rust_stable_oracle.rs"
+
+[[bin]]
+name = "compare-stable-oracles"
+path = "src/bin/compare_stable_oracles.rs"
+
 [dependencies]
 ru-libzmq-core.workspace = true
 zmq = { package = "ru-libzmq-ffi", path = "../ru-libzmq-ffi" }

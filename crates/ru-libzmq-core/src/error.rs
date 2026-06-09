@@ -11,6 +11,8 @@ pub enum Error {
     NotSupported,
     Terminated,
     Again,
+    InvalidState,
+    HostUnreachable,
     NotImplemented(&'static str),
 }
 
@@ -23,6 +25,8 @@ impl Error {
             Self::NotSupported | Self::NotImplemented(_) => ENOTSUP,
             Self::Terminated => ETERM,
             Self::Again => EAGAIN,
+            Self::InvalidState => EFSM,
+            Self::HostUnreachable => EHOSTUNREACH,
         }
     }
 }
@@ -36,6 +40,8 @@ impl fmt::Display for Error {
             Self::NotSupported => f.write_str("operation not supported"),
             Self::Terminated => f.write_str("context was terminated"),
             Self::Again => f.write_str("resource temporarily unavailable"),
+            Self::InvalidState => f.write_str("operation cannot be accomplished in current state"),
+            Self::HostUnreachable => f.write_str("host unreachable"),
             Self::NotImplemented(name) => write!(f, "{name} is not implemented yet"),
         }
     }

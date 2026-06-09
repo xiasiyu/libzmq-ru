@@ -18,22 +18,45 @@ pub(crate) struct ContextShared {
     next_socket_id: AtomicUsize,
     options: Mutex<ContextOptions>,
     inproc_endpoints: Mutex<HashMap<String, Arc<InprocEndpoint>>>,
-    pending_inproc: Mutex<HashMap<String, Vec<MessageQueue>>>,
+    pending_inproc: Mutex<HashMap<String, Vec<InprocPeer>>>,
 }
 
 pub(crate) type MessageQueue = Arc<Mutex<VecDeque<Message>>>;
+pub(crate) type SubscriptionSet = Arc<Mutex<Vec<Vec<u8>>>>;
+pub(crate) type WelcomeMessage = Arc<Mutex<Option<Vec<u8>>>>;
 
 #[derive(Debug)]
 pub(crate) struct InprocEndpoint {
     binder_inbox: MessageQueue,
-    peers: Mutex<Vec<MessageQueue>>,
+    binder_type: SocketType,
+    binder_subscriptions: SubscriptionSet,
+    binder_welcome: WelcomeMessage,
+    peers: Mutex<Vec<InprocPeer>>,
+    next_peer: AtomicUsize,
+}
+
+#[derive(Debug, Clone)]
+struct InprocPeer {
+    id: usize,
+    inbox: MessageQueue,
+    socket_type: SocketType,
+    subscriptions: SubscriptionSet,
 }
 
 impl InprocEndpoint {
-    pub(crate) fn new(binder_inbox: MessageQueue) -> Self {
+    pub(crate) fn new(
+        binder_inbox: MessageQueue,
+        binder_type: SocketType,
+        binder_subscriptions: SubscriptionSet,
+        binder_welcome: WelcomeMessage,
+    ) -> Self {
         Self {
             binder_inbox,
+            binder_type,
+            binder_subscriptions,
+            binder_welcome,
             peers: Mutex::new(Vec::new()),
+            next_peer: AtomicUsize::new(0),
         }
     }
 
@@ -41,23 +64,157 @@ impl InprocEndpoint {
         Arc::clone(&self.binder_inbox)
     }
 
-    pub(crate) fn add_peer(&self, peer_inbox: MessageQueue) -> Result<()> {
+    pub(crate) fn binder_type(&self) -> SocketType {
+        self.binder_type
+    }
+
+    pub(crate) fn binder_accepts(&self, message: &Message) -> Result<bool> {
+        socket_type_accepts_message(self.binder_type, &self.binder_subscriptions, message)
+    }
+
+    pub(crate) fn add_peer(
+        &self,
+        peer_id: usize,
+        peer_inbox: MessageQueue,
+        peer_type: SocketType,
+        peer_subscriptions: SubscriptionSet,
+    ) -> Result<()> {
+        if !inproc_types_compatible(self.binder_type, peer_type) {
+            return Err(Error::NotSupported);
+        }
         let mut peers = self.peers.lock().map_err(|_| Error::InvalidSocket)?;
-        peers.push(peer_inbox);
+        peers.push(InprocPeer {
+            id: peer_id,
+            inbox: peer_inbox,
+            socket_type: peer_type,
+            subscriptions: peer_subscriptions,
+        });
+        let peer = peers.last().cloned();
+        drop(peers);
+        if let Some(peer) = peer {
+            self.replay_xsub_subscriptions(&peer)?;
+            self.send_welcome_to_xsub(&peer)?;
+        }
         Ok(())
     }
 
-    pub(crate) fn remove_peer(&self, peer_inbox: &MessageQueue) -> Result<bool> {
+    pub(crate) fn remove_peer(&self, peer_id: usize) -> Result<bool> {
         let mut peers = self.peers.lock().map_err(|_| Error::InvalidSocket)?;
         let previous_len = peers.len();
-        peers.retain(|peer| !Arc::ptr_eq(peer, peer_inbox));
+        peers.retain(|peer| peer.id != peer_id);
         Ok(peers.len() != previous_len)
     }
 
     pub(crate) fn first_peer(&self) -> Result<Option<MessageQueue>> {
         let peers = self.peers.lock().map_err(|_| Error::InvalidSocket)?;
-        Ok(peers.first().cloned())
+        Ok(peers.first().map(|peer| Arc::clone(&peer.inbox)))
     }
+
+    pub(crate) fn next_peer(&self) -> Result<Option<MessageQueue>> {
+        let peers = self.peers.lock().map_err(|_| Error::InvalidSocket)?;
+        if peers.is_empty() {
+            return Ok(None);
+        }
+        let index = self.next_peer.fetch_add(1, Ordering::Relaxed) % peers.len();
+        Ok(Some(Arc::clone(&peers[index].inbox)))
+    }
+
+    pub(crate) fn peer_by_id(&self, id: usize) -> Result<Option<MessageQueue>> {
+        let peers = self.peers.lock().map_err(|_| Error::InvalidSocket)?;
+        Ok(peers
+            .iter()
+            .find(|peer| peer.id == id)
+            .map(|peer| Arc::clone(&peer.inbox)))
+    }
+
+    pub(crate) fn matching_peers(&self, message: &Message) -> Result<Vec<MessageQueue>> {
+        let peers = self.peers.lock().map_err(|_| Error::InvalidSocket)?;
+        let mut outboxes = Vec::new();
+        for peer in peers.iter() {
+            if socket_type_accepts_message(peer.socket_type, &peer.subscriptions, message)? {
+                outboxes.push(Arc::clone(&peer.inbox));
+            }
+        }
+        Ok(outboxes)
+    }
+
+    pub(crate) fn replay_subscription(&self, prefix: &[u8]) -> Result<()> {
+        if self.binder_type != SocketType::Xpub {
+            return Ok(());
+        }
+        let mut frame = Vec::with_capacity(prefix.len() + 1);
+        frame.push(1);
+        frame.extend_from_slice(prefix);
+        self.binder_inbox
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .push_back(Message::from_vec(frame));
+        Ok(())
+    }
+
+    fn replay_xsub_subscriptions(&self, peer: &InprocPeer) -> Result<()> {
+        if self.binder_type != SocketType::Xpub || peer.socket_type != SocketType::Xsub {
+            return Ok(());
+        }
+        let subscriptions = peer
+            .subscriptions
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?;
+        for prefix in subscriptions.iter() {
+            self.replay_subscription(prefix)?;
+        }
+        Ok(())
+    }
+
+    fn send_welcome_to_xsub(&self, peer: &InprocPeer) -> Result<()> {
+        if self.binder_type != SocketType::Xpub || peer.socket_type != SocketType::Xsub {
+            return Ok(());
+        }
+        if let Some(message) = self
+            .binder_welcome
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .clone()
+        {
+            peer.inbox
+                .lock()
+                .map_err(|_| Error::InvalidSocket)?
+                .push_back(Message::from_vec(message));
+        }
+        Ok(())
+    }
+}
+
+fn inproc_types_compatible(a: SocketType, b: SocketType) -> bool {
+    matches!(
+        (a, b),
+        (SocketType::Pair, SocketType::Pair)
+            | (SocketType::Push, SocketType::Pull)
+            | (SocketType::Pull, SocketType::Push)
+            | (SocketType::Dealer, SocketType::Router)
+            | (SocketType::Router, SocketType::Dealer)
+            | (SocketType::Req, SocketType::Rep)
+            | (SocketType::Rep, SocketType::Req)
+            | (SocketType::Pub, SocketType::Sub)
+            | (SocketType::Sub, SocketType::Pub)
+            | (SocketType::Xpub, SocketType::Xsub)
+            | (SocketType::Xsub, SocketType::Xpub)
+            | (SocketType::Stream, SocketType::Stream)
+    )
+}
+
+fn socket_type_accepts_message(
+    socket_type: SocketType,
+    subscriptions: &SubscriptionSet,
+    message: &Message,
+) -> Result<bool> {
+    if !matches!(socket_type, SocketType::Sub | SocketType::Xsub) {
+        return Ok(true);
+    }
+    let subscriptions = subscriptions.lock().map_err(|_| Error::InvalidSocket)?;
+    Ok(subscriptions
+        .iter()
+        .any(|prefix| message.data().starts_with(prefix)))
 }
 
 #[derive(Debug, Clone)]
@@ -173,7 +330,11 @@ impl ContextShared {
     pub(crate) fn bind_inproc(
         &self,
         endpoint: &str,
+        _id: usize,
         inbox: MessageQueue,
+        socket_type: SocketType,
+        subscriptions: SubscriptionSet,
+        welcome: WelcomeMessage,
     ) -> Result<Arc<InprocEndpoint>> {
         let mut endpoints = self
             .inproc_endpoints
@@ -182,7 +343,12 @@ impl ContextShared {
         if endpoints.contains_key(endpoint) {
             return Err(Error::InvalidArgument);
         }
-        let endpoint_state = Arc::new(InprocEndpoint::new(inbox));
+        let endpoint_state = Arc::new(InprocEndpoint::new(
+            inbox,
+            socket_type,
+            subscriptions,
+            welcome,
+        ));
         let pending_peers = self
             .pending_inproc
             .lock()
@@ -190,7 +356,7 @@ impl ContextShared {
             .remove(endpoint)
             .unwrap_or_default();
         for peer in pending_peers {
-            endpoint_state.add_peer(peer)?;
+            endpoint_state.add_peer(peer.id, peer.inbox, peer.socket_type, peer.subscriptions)?;
         }
         endpoints.insert(endpoint.to_string(), Arc::clone(&endpoint_state));
         Ok(endpoint_state)
@@ -199,14 +365,17 @@ impl ContextShared {
     pub(crate) fn connect_inproc(
         &self,
         endpoint: &str,
+        id: usize,
         inbox: MessageQueue,
+        socket_type: SocketType,
+        subscriptions: SubscriptionSet,
     ) -> Result<Option<Arc<InprocEndpoint>>> {
         let endpoints = self
             .inproc_endpoints
             .lock()
             .map_err(|_| Error::InvalidContext)?;
         if let Some(endpoint_state) = endpoints.get(endpoint).cloned() {
-            endpoint_state.add_peer(inbox)?;
+            endpoint_state.add_peer(id, inbox, socket_type, subscriptions)?;
             return Ok(Some(endpoint_state));
         }
         drop(endpoints);
@@ -215,7 +384,15 @@ impl ContextShared {
             .pending_inproc
             .lock()
             .map_err(|_| Error::InvalidContext)?;
-        pending.entry(endpoint.to_string()).or_default().push(inbox);
+        pending
+            .entry(endpoint.to_string())
+            .or_default()
+            .push(InprocPeer {
+                id,
+                inbox,
+                socket_type,
+                subscriptions,
+            });
         Ok(None)
     }
 
@@ -227,7 +404,7 @@ impl ContextShared {
             .ok_or(Error::InvalidArgument)
     }
 
-    pub(crate) fn disconnect_inproc(&self, endpoint: &str, inbox: &MessageQueue) -> Result<()> {
+    pub(crate) fn disconnect_inproc(&self, endpoint: &str, id: usize) -> Result<()> {
         let mut removed = false;
         if let Some(endpoint_state) = self
             .inproc_endpoints
@@ -236,7 +413,7 @@ impl ContextShared {
             .get(endpoint)
             .cloned()
         {
-            removed = endpoint_state.remove_peer(inbox)?;
+            removed = endpoint_state.remove_peer(id)?;
         }
 
         let mut pending = self
@@ -245,7 +422,7 @@ impl ContextShared {
             .map_err(|_| Error::InvalidContext)?;
         if let Some(peers) = pending.get_mut(endpoint) {
             let previous_len = peers.len();
-            peers.retain(|peer| !Arc::ptr_eq(peer, inbox));
+            peers.retain(|peer| peer.id != id);
             removed |= peers.len() != previous_len;
             if peers.is_empty() {
                 pending.remove(endpoint);

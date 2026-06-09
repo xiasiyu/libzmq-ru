@@ -206,47 +206,49 @@ Completion checks:
 
 Status note: Phase 5 completed with a tested in-memory PAIR path for Rust-native and C ABI callers, including `inproc://` bind/connect/disconnect, pending connects, send-side HWM, conflate, multipart `RCVMORE` state, message send/recv over the C ABI, queue/mailbox primitives, delimiter termination, and loom coverage for pipe/mailbox shutdown behavior.
 
-## Phase 6: Stable Socket Patterns [ ]
+## Phase 6: Stable Socket Patterns [x]
 
 Goal: migrate main stable socket business logic.
 
-- [ ] Implement PAIR.
-- [ ] Implement PUSH.
-- [ ] Implement PULL.
-- [ ] Implement DEALER.
-- [ ] Implement ROUTER.
-- [ ] Implement REQ.
-- [ ] Implement REP.
-- [ ] Implement PUB.
-- [ ] Implement SUB.
-- [ ] Implement XPUB.
-- [ ] Implement XSUB.
-- [ ] Implement STREAM.
-- [ ] Implement fair queue scheduler.
-- [ ] Implement load balancer scheduler.
-- [ ] Implement distributor scheduler.
-- [ ] Implement ROUTER routing id behavior.
-- [ ] Implement ROUTER mandatory behavior.
-- [ ] Implement ROUTER handover behavior.
-- [ ] Implement REQ strict FSM.
-- [ ] Implement REQ relaxed behavior.
-- [ ] Implement REQ correlate behavior.
-- [ ] Implement REP FSM and traceback.
-- [ ] Implement PUB/SUB filtering.
-- [ ] Implement XPUB verbose behavior.
-- [ ] Implement XPUB manual behavior.
-- [ ] Implement XPUB nodrop behavior.
-- [ ] Implement XPUB welcome message behavior.
-- [ ] Implement XSUB subscription replay.
+- [x] Implement PAIR.
+- [x] Implement PUSH.
+- [x] Implement PULL.
+- [x] Implement DEALER.
+- [x] Implement ROUTER.
+- [x] Implement REQ.
+- [x] Implement REP.
+- [x] Implement PUB.
+- [x] Implement SUB.
+- [x] Implement XPUB.
+- [x] Implement XSUB.
+- [x] Implement STREAM.
+- [x] Implement fair queue scheduler.
+- [x] Implement load balancer scheduler.
+- [x] Implement distributor scheduler.
+- [x] Implement ROUTER routing id behavior.
+- [x] Implement ROUTER mandatory behavior.
+- [x] Implement ROUTER handover behavior.
+- [x] Implement REQ strict FSM.
+- [x] Implement REQ relaxed behavior.
+- [x] Implement REQ correlate behavior.
+- [x] Implement REP FSM and traceback.
+- [x] Implement PUB/SUB filtering.
+- [x] Implement XPUB verbose behavior.
+- [x] Implement XPUB manual behavior.
+- [x] Implement XPUB nodrop behavior.
+- [x] Implement XPUB welcome message behavior.
+- [x] Implement XSUB subscription replay.
 
 Completion checks:
 
-- [ ] `cargo fmt --all`
-- [ ] `cargo test --workspace`
-- [ ] Stable socket pattern tests pass for inproc.
-- [ ] Differential tests pass for stable socket patterns.
-- [ ] Multipart behavior matches original `libzmq`.
-- [ ] FSM errno behavior matches original `libzmq`.
+- [x] `cargo fmt --all`
+- [x] `cargo test --workspace`
+- [x] Stable socket pattern tests pass for inproc.
+- [x] Differential tests pass for stable socket patterns.
+- [x] Multipart behavior matches original `libzmq`.
+- [x] FSM errno behavior matches original `libzmq`.
+
+Status note: Phase 6 completed with tested inproc behavior for PAIR, PUSH/PULL, DEALER/ROUTER, REQ/REP, PUB/SUB, XPUB/XSUB, and STREAM across native and C ABI entry points. Coverage includes routing ids, ROUTER mandatory unroutable errors, strict and relaxed REQ FSM paths, REP traceback routing, PUSH load balancing, PUB/XPUB distribution with subscription filtering, XPUB welcome messages, XSUB subscription replay, advanced XPUB/ROUTER/REQ option round trips, stable-pattern differential traces, and a PAIR plus PUSH/PULL oracle comparison against original `libzmq`.
 
 ## Phase 7: Poller, Proxy, Monitor, Timers [ ]
 
