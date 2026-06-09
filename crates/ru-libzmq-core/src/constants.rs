@@ -1,0 +1,57 @@
+pub const ZMQ_VERSION_MAJOR: i32 = 4;
+pub const ZMQ_VERSION_MINOR: i32 = 3;
+pub const ZMQ_VERSION_PATCH: i32 = 6;
+
+pub const ZMQ_HAUSNUMERO: i32 = 156_384_712;
+pub const ENOTSUP: i32 = ZMQ_HAUSNUMERO + 1;
+pub const EPROTONOSUPPORT: i32 = ZMQ_HAUSNUMERO + 2;
+pub const ENOBUFS: i32 = ZMQ_HAUSNUMERO + 3;
+pub const ENETDOWN: i32 = ZMQ_HAUSNUMERO + 4;
+pub const EADDRINUSE: i32 = ZMQ_HAUSNUMERO + 5;
+pub const EADDRNOTAVAIL: i32 = ZMQ_HAUSNUMERO + 6;
+pub const ECONNREFUSED: i32 = ZMQ_HAUSNUMERO + 7;
+pub const EINPROGRESS: i32 = ZMQ_HAUSNUMERO + 8;
+pub const ENOTSOCK: i32 = ZMQ_HAUSNUMERO + 9;
+pub const EMSGSIZE: i32 = ZMQ_HAUSNUMERO + 10;
+pub const EAFNOSUPPORT: i32 = ZMQ_HAUSNUMERO + 11;
+pub const ENETUNREACH: i32 = ZMQ_HAUSNUMERO + 12;
+pub const ECONNABORTED: i32 = ZMQ_HAUSNUMERO + 13;
+pub const ECONNRESET: i32 = ZMQ_HAUSNUMERO + 14;
+pub const ENOTCONN: i32 = ZMQ_HAUSNUMERO + 15;
+pub const ETIMEDOUT: i32 = ZMQ_HAUSNUMERO + 16;
+pub const EHOSTUNREACH: i32 = ZMQ_HAUSNUMERO + 17;
+pub const ENETRESET: i32 = ZMQ_HAUSNUMERO + 18;
+pub const EFSM: i32 = ZMQ_HAUSNUMERO + 51;
+pub const ENOCOMPATPROTO: i32 = ZMQ_HAUSNUMERO + 52;
+pub const ETERM: i32 = ZMQ_HAUSNUMERO + 53;
+pub const EMTHREAD: i32 = ZMQ_HAUSNUMERO + 54;
+
+pub const EINVAL: i32 = 22;
+pub const EFAULT: i32 = 14;
+pub const EAGAIN: i32 = 11;
+
+pub const ZMQ_PAIR: i32 = 0;
+pub const ZMQ_PUB: i32 = 1;
+pub const ZMQ_SUB: i32 = 2;
+pub const ZMQ_REQ: i32 = 3;
+pub const ZMQ_REP: i32 = 4;
+pub const ZMQ_DEALER: i32 = 5;
+pub const ZMQ_ROUTER: i32 = 6;
+pub const ZMQ_PULL: i32 = 7;
+pub const ZMQ_PUSH: i32 = 8;
+pub const ZMQ_XPUB: i32 = 9;
+pub const ZMQ_XSUB: i32 = 10;
+pub const ZMQ_STREAM: i32 = 11;
+pub const ZMQ_SERVER: i32 = 12;
+pub const ZMQ_CLIENT: i32 = 13;
+pub const ZMQ_RADIO: i32 = 14;
+pub const ZMQ_DISH: i32 = 15;
+pub const ZMQ_GATHER: i32 = 16;
+pub const ZMQ_SCATTER: i32 = 17;
+pub const ZMQ_DGRAM: i32 = 18;
+pub const ZMQ_PEER: i32 = 19;
+pub const ZMQ_CHANNEL: i32 = 20;
+
+pub const ZMQ_DONTWAIT: i32 = 1;
+pub const ZMQ_SNDMORE: i32 = 2;
+pub const ZMQ_MORE: i32 = 1;

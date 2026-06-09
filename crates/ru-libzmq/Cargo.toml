@@ -1,0 +1,53 @@
+[package]
+name = "ru-libzmq"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ru_libzmq"
+
+[dependencies]
+ru-libzmq-core.workspace = true
+
+[features]
+default = ["tcp", "ipc", "inproc", "poller", "plain", "zap"]
+full = [
+    "curve",
+    "draft",
+    "gssapi",
+    "ipc",
+    "inproc",
+    "norm",
+    "openpgm",
+    "plain",
+    "poller",
+    "tcp",
+    "tipc",
+    "udp",
+    "vmci",
+    "vsock",
+    "ws",
+    "wss",
+    "zap",
+]
+curve = []
+draft = []
+gssapi = []
+ipc = []
+inproc = []
+norm = []
+openpgm = []
+plain = []
+poller = []
+tcp = []
+tipc = []
+udp = []
+vmci = []
+vsock = []
+ws = []
+wss = ["ws"]
+zap = []
+
+[lints]
+workspace = true

@@ -1,0 +1,25 @@
+[workspace]
+members = [
+    "crates/ru-libzmq-core",
+    "crates/ru-libzmq",
+    "crates/ru-libzmq-ffi",
+    "crates/ru-libzmq-sys",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+repository = "https://example.invalid/ru-libzmq"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+
+[workspace.dependencies]
+ru-libzmq-core = { path = "crates/ru-libzmq-core" }
+ru-libzmq-sys = { path = "crates/ru-libzmq-sys" }

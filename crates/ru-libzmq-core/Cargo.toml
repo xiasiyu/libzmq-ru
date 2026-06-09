@@ -1,0 +1,11 @@
+[package]
+name = "ru-libzmq-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ru_libzmq_core"
+
+[lints]
+workspace = true
