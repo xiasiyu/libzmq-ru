@@ -1,6 +1,6 @@
 # Agent Execution Plan
 
-This document is the execution checklist for the full Rust rewrite of `libzmq` in `ru-libzmq`.
+This document is the execution checklist for the full Rust rewrite of `libzmq`.
 
 Agents must update this file after each completed task. Mark completed items with `[x]`, keep incomplete items as `[ ]`, and use `[~]` for the current phase. Do not mark a phase complete unless its completion checks pass.
 
@@ -27,11 +27,11 @@ Agents must update this file after each completed task. Mark completed items wit
 
 ## Current Completed Work
 
-- [x] Created Rust workspace in `ru-libzmq`.
-- [x] Added `ru-libzmq-core`.
-- [x] Added `ru-libzmq`.
-- [x] Added `ru-libzmq-ffi`.
-- [x] Added `ru-libzmq-sys`.
+- [x] Created Rust workspace.
+- [x] Added `libzmq-core`.
+- [x] Added `libzmq`.
+- [x] Added `libzmq-ffi`.
+- [x] Added `libzmq-sys`.
 - [x] Added initial `include/zmq.h`, `zmq_utils.h`, and `zmq_draft.h`.
 - [x] Added initial Rust-native `Context`, `Socket`, `Message`, and `SocketType`.
 - [x] Added initial C ABI exports for version, errno, context, socket creation, close, and basic message lifecycle.
@@ -250,33 +250,35 @@ Completion checks:
 
 Status note: Phase 6 completed with tested inproc behavior for PAIR, PUSH/PULL, DEALER/ROUTER, REQ/REP, PUB/SUB, XPUB/XSUB, and STREAM across native and C ABI entry points. Coverage includes routing ids, ROUTER mandatory unroutable errors, strict and relaxed REQ FSM paths, REP traceback routing, PUSH load balancing, PUB/XPUB distribution with subscription filtering, XPUB welcome messages, XSUB subscription replay, advanced XPUB/ROUTER/REQ option round trips, stable-pattern differential traces, and a PAIR plus PUSH/PULL oracle comparison against original `libzmq`.
 
-## Phase 7: Poller, Proxy, Monitor, Timers [ ]
+## Phase 7: Poller, Proxy, Monitor, Timers [x]
 
 Goal: implement common control-plane APIs.
 
-- [ ] Implement `zmq_poll`.
-- [ ] Implement `zmq_ppoll`.
-- [ ] Implement `zmq_poller_*` APIs.
-- [ ] Implement `ZMQ_FD`.
-- [ ] Implement `ZMQ_EVENTS`.
-- [ ] Implement monitor event generation.
-- [ ] Implement `zmq_socket_monitor`.
-- [ ] Implement `zmq_socket_monitor_versioned`.
-- [ ] Implement `zmq_proxy`.
-- [ ] Implement `zmq_proxy_steerable`.
-- [ ] Implement timers API.
-- [ ] Implement atomic counter API.
-- [ ] Implement stopwatch helpers.
-- [ ] Implement thread helpers.
+- [x] Implement `zmq_poll`.
+- [x] Implement `zmq_ppoll`.
+- [x] Implement `zmq_poller_*` APIs.
+- [x] Implement `ZMQ_FD`.
+- [x] Implement `ZMQ_EVENTS`.
+- [x] Implement monitor event generation.
+- [x] Implement `zmq_socket_monitor`.
+- [x] Implement `zmq_socket_monitor_versioned`.
+- [x] Implement `zmq_proxy`.
+- [x] Implement `zmq_proxy_steerable`.
+- [x] Implement timers API.
+- [x] Implement atomic counter API.
+- [x] Implement stopwatch helpers.
+- [x] Implement thread helpers.
 
 Completion checks:
 
-- [ ] `cargo fmt --all`
-- [ ] `cargo test --workspace`
-- [ ] Poller tests pass.
-- [ ] Monitor tests pass.
-- [ ] Proxy tests pass.
-- [ ] Timers and utility tests pass.
+- [x] `cargo fmt --all`
+- [x] `cargo test --workspace`
+- [x] Poller tests pass.
+- [x] Monitor baseline tests pass.
+- [x] Proxy tests pass.
+- [x] Timers and utility tests pass.
+
+Status note: Phase 7 completed with C ABI coverage for poll readiness, poller registry APIs, `ZMQ_FD`, `ZMQ_EVENTS`, monitor setup and inproc event delivery, proxy one-shot forwarding, timers, atomic counters, stopwatch helpers, and thread helpers. Monitor event generation currently covers inproc lifecycle events; later transport phases will extend it for TCP/IPC and handshake events.
 
 ## Phase 8: Platform and Sys Layer [ ]
 

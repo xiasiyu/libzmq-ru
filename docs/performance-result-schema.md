@@ -1,6 +1,6 @@
 # Performance Result Schema
 
-Performance gates compare Rust `ru-libzmq` against original C++ `libzmq`.
+Performance gates compare this Rust implementation against original C++ `libzmq`.
 
 Latency passes when:
 

@@ -74,6 +74,7 @@ pub struct Socket {
     subscriptions: SubscriptionSet,
     xpub_welcome: WelcomeMessage,
     inproc: Mutex<InprocState>,
+    monitor: Mutex<Option<MonitorState>>,
     last_recv_more: Mutex<bool>,
     last_recv_routing_id: Mutex<Option<u32>>,
     pattern_state: Mutex<Option<PatternState>>,
@@ -91,6 +92,12 @@ struct InprocState {
     connected_endpoint: Option<String>,
     bound_endpoint_name: Option<String>,
     bound_endpoint: Option<Arc<InprocEndpoint>>,
+}
+
+#[derive(Debug)]
+struct MonitorState {
+    endpoint_name: String,
+    events: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +150,7 @@ impl Socket {
             subscriptions: Arc::new(Mutex::new(Vec::new())),
             xpub_welcome: Arc::new(Mutex::new(None)),
             inproc: Mutex::new(InprocState::default()),
+            monitor: Mutex::new(None),
             last_recv_more: Mutex::new(false),
             last_recv_routing_id: Mutex::new(None),
             pattern_state: Mutex::new(match socket_type {
@@ -162,65 +170,105 @@ impl Socket {
     }
 
     pub fn bind(&self, endpoint: &str) -> Result<()> {
-        let endpoint = endpoint
+        let endpoint_name = endpoint
             .strip_prefix("inproc://")
             .ok_or(Error::NotSupported)?;
         let bound = self.context.bind_inproc(
-            endpoint,
+            endpoint_name,
             self.id,
             Arc::clone(&self.inbox),
             self.socket_type,
             Arc::clone(&self.subscriptions),
             Arc::clone(&self.xpub_welcome),
         )?;
-        let mut inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
-        inproc.bound_endpoint_name = Some(endpoint.to_string());
-        inproc.bound_endpoint = Some(bound);
+        {
+            let mut inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
+            inproc.bound_endpoint_name = Some(endpoint_name.to_string());
+            inproc.bound_endpoint = Some(bound);
+        }
+        self.emit_monitor_event(ZMQ_EVENT_LISTENING, 0, endpoint)?;
         Ok(())
     }
 
     pub fn unbind(&self, endpoint: &str) -> Result<()> {
-        let endpoint = endpoint
+        let endpoint_name = endpoint
             .strip_prefix("inproc://")
             .ok_or(Error::NotSupported)?;
-        let mut inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
-        if inproc.bound_endpoint_name.as_deref() != Some(endpoint) {
-            return Err(Error::InvalidArgument);
+        {
+            let mut inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
+            if inproc.bound_endpoint_name.as_deref() != Some(endpoint_name) {
+                return Err(Error::InvalidArgument);
+            }
+            self.context.unbind_inproc(endpoint_name)?;
+            inproc.bound_endpoint_name = None;
+            inproc.bound_endpoint = None;
         }
-        self.context.unbind_inproc(endpoint)?;
-        inproc.bound_endpoint_name = None;
-        inproc.bound_endpoint = None;
+        self.emit_monitor_event(ZMQ_EVENT_CLOSED, 0, endpoint)?;
         Ok(())
     }
 
     pub fn connect(&self, endpoint: &str) -> Result<()> {
-        let endpoint = endpoint
+        let endpoint_name = endpoint
             .strip_prefix("inproc://")
             .ok_or(Error::NotSupported)?;
         let bound = self.context.connect_inproc(
-            endpoint,
+            endpoint_name,
             self.id,
             Arc::clone(&self.inbox),
             self.socket_type,
             Arc::clone(&self.subscriptions),
         )?;
-        let mut inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
-        inproc.connected_endpoint = Some(endpoint.to_string());
-        inproc.direct_outbox = bound.map(|bound| bound.binder_inbox());
+        {
+            let mut inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
+            inproc.connected_endpoint = Some(endpoint_name.to_string());
+            inproc.direct_outbox = bound.map(|bound| bound.binder_inbox());
+        }
+        self.emit_monitor_event(ZMQ_EVENT_CONNECTED, 0, endpoint)?;
         Ok(())
     }
 
     pub fn disconnect(&self, endpoint: &str) -> Result<()> {
-        let endpoint = endpoint
+        let endpoint_name = endpoint
             .strip_prefix("inproc://")
             .ok_or(Error::NotSupported)?;
-        let mut inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
-        if inproc.connected_endpoint.as_deref() != Some(endpoint) {
-            return Err(Error::InvalidArgument);
+        {
+            let mut inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
+            if inproc.connected_endpoint.as_deref() != Some(endpoint_name) {
+                return Err(Error::InvalidArgument);
+            }
+            self.context.disconnect_inproc(endpoint_name, self.id)?;
+            inproc.connected_endpoint = None;
+            inproc.direct_outbox = None;
         }
-        self.context.disconnect_inproc(endpoint, self.id)?;
-        inproc.connected_endpoint = None;
-        inproc.direct_outbox = None;
+        self.emit_monitor_event(ZMQ_EVENT_DISCONNECTED, 0, endpoint)?;
+        Ok(())
+    }
+
+    pub fn monitor(&self, endpoint: &str, events: u64) -> Result<()> {
+        let endpoint_name = endpoint
+            .strip_prefix("inproc://")
+            .ok_or(Error::NotSupported)?;
+        if let Some(previous) = self
+            .monitor
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .take()
+        {
+            let _ = self.context.unbind_inproc(&previous.endpoint_name);
+        }
+        let monitor_inbox = Arc::new(Mutex::new(VecDeque::new()));
+        self.context.bind_inproc(
+            endpoint_name,
+            0,
+            monitor_inbox,
+            SocketType::Pair,
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(None)),
+        )?;
+        *self.monitor.lock().map_err(|_| Error::InvalidSocket)? = Some(MonitorState {
+            endpoint_name: endpoint_name.to_string(),
+            events,
+        });
         Ok(())
     }
 
@@ -389,6 +437,8 @@ impl Socket {
             ZMQ_XPUB_VERBOSER => Ok(i32::from(options.xpub_verboser)),
             ZMQ_XPUB_NODROP => Ok(i32::from(options.xpub_nodrop)),
             ZMQ_XPUB_MANUAL => Ok(i32::from(options.xpub_manual)),
+            ZMQ_FD => Ok(-1),
+            ZMQ_EVENTS => Ok(self.events()? as i32),
             ZMQ_RCVMORE => Ok(i32::from(
                 *self
                     .last_recv_more
@@ -398,6 +448,23 @@ impl Socket {
             ZMQ_THREAD_SAFE => Ok(0),
             _ => Err(Error::InvalidArgument),
         }
+    }
+
+    pub fn events(&self) -> Result<i16> {
+        let mut events = 0;
+        if self.can_recv()
+            && !self
+                .inbox
+                .lock()
+                .map_err(|_| Error::InvalidSocket)?
+                .is_empty()
+        {
+            events |= ZMQ_POLLIN as i16;
+        }
+        if self.can_send() && self.resolve_outboxes(&Message::new()).is_ok() {
+            events |= ZMQ_POLLOUT as i16;
+        }
+        Ok(events)
     }
 
     fn resolve_outboxes(&self, message: &Message) -> Result<Vec<MessageQueue>> {
@@ -430,6 +497,42 @@ impl Socket {
             };
         }
         Err(Error::Again)
+    }
+
+    fn emit_monitor_event(&self, event: i32, value: i32, endpoint: &str) -> Result<()> {
+        let Some(monitor) = self
+            .monitor
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .as_ref()
+            .map(|monitor| MonitorState {
+                endpoint_name: monitor.endpoint_name.clone(),
+                events: monitor.events,
+            })
+        else {
+            return Ok(());
+        };
+        if monitor.events & event as u64 == 0 && monitor.events != ZMQ_EVENT_ALL as u64 {
+            return Ok(());
+        }
+        let Some(monitor_endpoint) = self.context.inproc_endpoint(&monitor.endpoint_name)? else {
+            return Ok(());
+        };
+        let Some(outbox) = monitor_endpoint.first_peer()? else {
+            return Ok(());
+        };
+
+        let mut event_frame = Vec::with_capacity(6);
+        event_frame.extend_from_slice(&(event as u16).to_ne_bytes());
+        event_frame.extend_from_slice(&value.to_ne_bytes());
+        let mut event_message = Message::from_vec(event_frame);
+        event_message.set_more(true);
+        let endpoint_message = Message::from_vec(endpoint.as_bytes().to_vec());
+
+        let mut queue = outbox.lock().map_err(|_| Error::InvalidSocket)?;
+        queue.push_back(event_message);
+        queue.push_back(endpoint_message);
+        Ok(())
     }
 
     fn apply_outgoing_routing_id(&self, message: &mut Message) -> Result<()> {

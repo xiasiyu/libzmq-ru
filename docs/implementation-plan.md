@@ -1,17 +1,17 @@
 # Implementation Plan
 
-This project is a full Rust rewrite of `libzmq` under `ru-libzmq`. The target is not a partial MVP: stable, deprecated, and draft C APIs remain supported, and a Rust-native API is added on top of the same core.
+This project is a full Rust rewrite of `libzmq`. The target is not a partial MVP: stable, deprecated, and draft C APIs remain supported, and a Rust-native API is added on top of the same core.
 
 ## Architecture
 
 ```text
 include/zmq.h compatible C ABI
-  -> crates/ru-libzmq-ffi
-    -> crates/ru-libzmq-core
-    <- crates/ru-libzmq
+  -> crates/libzmq-ffi
+    -> crates/libzmq-core
+    <- crates/libzmq
 Rust-native API
 
-crates/ru-libzmq-sys isolates OS and third-party FFI.
+crates/libzmq-sys isolates OS and third-party FFI.
 ```
 
 ## Phases

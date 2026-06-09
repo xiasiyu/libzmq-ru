@@ -1,4 +1,4 @@
-//! Platform and third-party FFI isolation for ru-libzmq.
+//! Platform and third-party FFI isolation for libzmq.
 //!
 //! Business logic must not call OS or third-party C APIs directly. Future socket,
 //! poller, GSSAPI, OpenPGM, and NORM bindings belong in this crate or modules

@@ -1,14 +1,14 @@
 [package]
-name = "ru-libzmq"
+name = "libzmq"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "ru_libzmq"
+name = "libzmq"
 
 [dependencies]
-ru-libzmq-core.workspace = true
+libzmq-core.workspace = true
 
 [features]
 default = ["tcp", "ipc", "inproc", "poller", "plain", "zap"]

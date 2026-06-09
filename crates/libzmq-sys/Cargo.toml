@@ -1,11 +1,11 @@
 [package]
-name = "ru-libzmq-sys"
+name = "libzmq-sys"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "ru_libzmq_sys"
+name = "libzmq_sys"
 
 [features]
 default = []

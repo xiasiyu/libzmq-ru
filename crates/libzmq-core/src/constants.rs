@@ -80,6 +80,8 @@ pub const ZMQ_ROUTING_ID: i32 = 5;
 pub const ZMQ_SUBSCRIBE: i32 = 6;
 pub const ZMQ_UNSUBSCRIBE: i32 = 7;
 pub const ZMQ_RCVMORE: i32 = 13;
+pub const ZMQ_FD: i32 = 14;
+pub const ZMQ_EVENTS: i32 = 15;
 pub const ZMQ_TYPE: i32 = 16;
 pub const ZMQ_LINGER: i32 = 17;
 pub const ZMQ_SNDHWM: i32 = 23;
@@ -97,3 +99,12 @@ pub const ZMQ_XPUB_MANUAL: i32 = 71;
 pub const ZMQ_XPUB_WELCOME_MSG: i32 = 72;
 pub const ZMQ_XPUB_VERBOSER: i32 = 78;
 pub const ZMQ_THREAD_SAFE: i32 = 81;
+
+pub const ZMQ_POLLIN: i32 = 1;
+pub const ZMQ_POLLOUT: i32 = 2;
+
+pub const ZMQ_EVENT_CONNECTED: i32 = 0x0001;
+pub const ZMQ_EVENT_LISTENING: i32 = 0x0008;
+pub const ZMQ_EVENT_CLOSED: i32 = 0x0080;
+pub const ZMQ_EVENT_DISCONNECTED: i32 = 0x0200;
+pub const ZMQ_EVENT_ALL: i32 = 0xFFFF;

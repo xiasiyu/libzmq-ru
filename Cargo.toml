@@ -1,10 +1,10 @@
 [workspace]
 members = [
-    "crates/ru-libzmq-core",
-    "crates/ru-libzmq",
-    "crates/ru-libzmq-ffi",
-    "crates/ru-libzmq-sys",
-    "crates/ru-libzmq-test-harness",
+    "crates/libzmq-core",
+    "crates/libzmq",
+    "crates/libzmq-ffi",
+    "crates/libzmq-sys",
+    "crates/libzmq-test-harness",
 ]
 resolver = "2"
 
@@ -12,7 +12,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "MPL-2.0"
-repository = "https://example.invalid/ru-libzmq"
+repository = "https://github.com/zeromq/libzmq"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
@@ -22,5 +22,5 @@ undocumented_unsafe_blocks = "deny"
 missing_safety_doc = "deny"
 
 [workspace.dependencies]
-ru-libzmq-core = { path = "crates/ru-libzmq-core" }
-ru-libzmq-sys = { path = "crates/ru-libzmq-sys" }
+libzmq-core = { path = "crates/libzmq-core" }
+libzmq-sys = { path = "crates/libzmq-sys" }

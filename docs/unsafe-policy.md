@@ -4,8 +4,8 @@ The handwritten unsafe code target is below 10% for the full project and below 8
 
 ## Allowed Unsafe Islands
 
-- `crates/ru-libzmq-ffi`: C ABI raw pointers and `zmq_msg_t` layout.
-- `crates/ru-libzmq-sys`: platform syscalls and third-party C libraries.
+- `crates/libzmq-ffi`: C ABI raw pointers and `zmq_msg_t` layout.
+- `crates/libzmq-sys`: platform syscalls and third-party C libraries.
 - Future `platform` modules: fd/socket ownership, poller syscall boundaries, sockaddr casts.
 - Future crypto FFI modules: libsodium, GSSAPI, OpenPGM, NORM.
 

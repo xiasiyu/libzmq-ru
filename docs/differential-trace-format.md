@@ -1,6 +1,6 @@
 # Differential Trace Format
 
-Differential tests compare observable behavior from original C++ `libzmq` and Rust `ru-libzmq`.
+Differential tests compare observable behavior from original C++ `libzmq` and this Rust implementation.
 
 The trace format is JSON Lines. Each line contains one event and can be streamed from a runner.
 
@@ -38,13 +38,13 @@ Observation event:
 The initial Rust runner is intentionally small and only emits version/context/socket traces:
 
 ```sh
-cargo run -p ru-libzmq-test-harness --bin differential-runner
+cargo run -p libzmq-test-harness --bin differential-runner
 ```
 
 Original C++ message oracle invocation after building `../libzmq/build-ru-oracle/lib/libzmq.dylib`:
 
 ```sh
-cargo run -p ru-libzmq-test-harness --bin cpp-message-oracle
+cargo run -p libzmq-test-harness --bin cpp-message-oracle
 ```
 
 Set `LIBZMQ_ORACLE=/path/to/libzmq.dylib` to use a different original library. Future work will compare normalized trace files automatically.
@@ -52,12 +52,12 @@ Set `LIBZMQ_ORACLE=/path/to/libzmq.dylib` to use a different original library. F
 Rust message oracle invocation:
 
 ```sh
-cargo run -p ru-libzmq-test-harness --bin rust-message-oracle
+cargo run -p libzmq-test-harness --bin rust-message-oracle
 ```
 
 Automated message oracle comparison:
 
 ```sh
-cargo build -p ru-libzmq-test-harness --bins
-cargo run -p ru-libzmq-test-harness --bin compare-message-oracles
+cargo build -p libzmq-test-harness --bins
+cargo run -p libzmq-test-harness --bin compare-message-oracles
 ```

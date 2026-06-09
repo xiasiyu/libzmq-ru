@@ -61,6 +61,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
+name = "libzmq"
+version = "0.1.0"
+dependencies = [
+ "libzmq-core",
+]
+
+[[package]]
+name = "libzmq-core"
+version = "0.1.0"
+dependencies = [
+ "loom",
+]
+
+[[package]]
+name = "libzmq-ffi"
+version = "0.1.0"
+dependencies = [
+ "libzmq-core",
+]
+
+[[package]]
+name = "libzmq-sys"
+version = "0.1.0"
+
+[[package]]
+name = "libzmq-test-harness"
+version = "0.1.0"
+dependencies = [
+ "libzmq-core",
+ "libzmq-ffi",
+]
+
+[[package]]
 name = "log"
 version = "0.4.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -131,39 +164,6 @@ name = "regex-syntax"
 version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
-
-[[package]]
-name = "ru-libzmq"
-version = "0.1.0"
-dependencies = [
- "ru-libzmq-core",
-]
-
-[[package]]
-name = "ru-libzmq-core"
-version = "0.1.0"
-dependencies = [
- "loom",
-]
-
-[[package]]
-name = "ru-libzmq-ffi"
-version = "0.1.0"
-dependencies = [
- "ru-libzmq-core",
-]
-
-[[package]]
-name = "ru-libzmq-sys"
-version = "0.1.0"
-
-[[package]]
-name = "ru-libzmq-test-harness"
-version = "0.1.0"
-dependencies = [
- "ru-libzmq-core",
- "ru-libzmq-ffi",
-]
 
 [[package]]
 name = "rustversion"

@@ -1,5 +1,5 @@
-use ru_libzmq_core::{Context, SocketType};
-use ru_libzmq_test_harness::{Observation, Operation, TraceCase};
+use libzmq_core::{Context, SocketType};
+use libzmq_test_harness::{Observation, Operation, TraceCase};
 
 fn main() {
     let mut traces = Vec::new();
@@ -128,7 +128,7 @@ fn pub_sub_inproc_trace() -> TraceCase {
 }
 
 fn version_trace() -> TraceCase {
-    let (major, minor, patch) = ru_libzmq_core::version();
+    let (major, minor, patch) = libzmq_core::version();
     TraceCase {
         name: "version",
         operations: vec![Operation::Version],

@@ -1,10 +1,13 @@
-use ru_libzmq_core::constants::*;
-use ru_libzmq_core::{Context, Error, Message, Socket, SocketType};
+use libzmq_core::constants::*;
+use libzmq_core::{Context, Error, Message, Socket, SocketType};
 use std::cell::Cell;
 use std::convert::TryFrom;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 thread_local! {
     static LAST_ERRNO: Cell<c_int> = Cell::new(0);
@@ -39,25 +42,27 @@ type ZmqTimerFn = Option<extern "C" fn(timer_id: c_int, arg: *mut c_void)>;
 type ZmqThreadFn = Option<extern "C" fn(arg: *mut c_void)>;
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct ZmqPollItem {
-    socket: *mut c_void,
-    fd: ZmqFd,
-    events: i16,
-    revents: i16,
+    pub socket: *mut c_void,
+    pub fd: ZmqFd,
+    pub events: i16,
+    pub revents: i16,
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct ZmqPollerEvent {
-    socket: *mut c_void,
-    fd: ZmqFd,
-    user_data: *mut c_void,
-    events: i16,
+    pub socket: *mut c_void,
+    pub fd: ZmqFd,
+    pub user_data: *mut c_void,
+    pub events: i16,
 }
 
 #[repr(C)]
 pub struct Iovec {
-    iov_base: *mut c_void,
-    iov_len: usize,
+    pub iov_base: *mut c_void,
+    pub iov_len: usize,
 }
 
 #[cfg(windows)]
@@ -71,6 +76,44 @@ struct OpaqueContext {
 
 struct OpaqueSocket {
     inner: Socket,
+}
+
+struct OpaqueAtomicCounter {
+    value: AtomicI32,
+}
+
+struct OpaqueStopwatch {
+    start: Instant,
+}
+
+struct OpaqueThread {
+    handle: Option<JoinHandle<()>>,
+}
+
+struct OpaqueTimers {
+    next_id: c_int,
+    timers: Vec<TimerEntry>,
+}
+
+struct TimerEntry {
+    id: c_int,
+    interval: Duration,
+    deadline: Instant,
+    handler: ZmqTimerFn,
+    arg: *mut c_void,
+    active: bool,
+}
+
+struct OpaquePoller {
+    entries: Mutex<Vec<PollerEntry>>,
+}
+
+struct PollerEntry {
+    socket: *mut c_void,
+    fd: ZmqFd,
+    user_data: *mut c_void,
+    events: i16,
+    is_fd: bool,
 }
 
 enum MessageStorage {
@@ -304,6 +347,27 @@ fn socket_from_raw(socket: *mut c_void) -> Result<&'static mut OpaqueSocket, Err
     Ok(unsafe { &mut *(socket.cast::<OpaqueSocket>()) })
 }
 
+fn poller_from_raw(poller: *mut c_void) -> Result<&'static mut OpaquePoller, Error> {
+    if poller.is_null() {
+        return Err(Error::InvalidArgument);
+    }
+    // SAFETY: C ABI callers receive poller pointers only from `zmq_poller_new`.
+    Ok(unsafe { &mut *(poller.cast::<OpaquePoller>()) })
+}
+
+fn timers_from_raw(timers: *mut c_void) -> Result<&'static mut OpaqueTimers, Error> {
+    if timers.is_null() {
+        return Err(Error::InvalidArgument);
+    }
+    // SAFETY: C ABI callers receive timer pointers only from `zmq_timers_new`.
+    Ok(unsafe { &mut *(timers.cast::<OpaqueTimers>()) })
+}
+
+fn socket_revents(socket: *mut c_void, requested: i16) -> Result<i16, Error> {
+    let socket = socket_from_raw(socket)?;
+    Ok(socket.inner.events()? & requested)
+}
+
 fn endpoint_from_raw(endpoint: *const c_char) -> Result<&'static str, Error> {
     if endpoint.is_null() {
         return Err(Error::InvalidArgument);
@@ -315,7 +379,7 @@ fn endpoint_from_raw(endpoint: *const c_char) -> Result<&'static str, Error> {
 
 #[no_mangle]
 pub extern "C" fn zmq_version(major: *mut c_int, minor: *mut c_int, patch: *mut c_int) {
-    let (version_major, version_minor, version_patch) = ru_libzmq_core::version();
+    let (version_major, version_minor, version_patch) = libzmq_core::version();
     // SAFETY: Each output pointer is optional in practice; non-null pointers are writable ints.
     unsafe {
         if !major.is_null() {
@@ -956,18 +1020,64 @@ pub extern "C" fn zmq_send_const(
 #[no_mangle]
 pub extern "C" fn zmq_socket_monitor(
     socket: *mut c_void,
-    _endpoint: *const c_char,
-    _events: c_int,
+    endpoint: *const c_char,
+    events: c_int,
 ) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
+    if endpoint.is_null() {
+        return set_error(Error::InvalidArgument);
     }
-    unsupported_int("zmq_socket_monitor")
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    let endpoint = match endpoint_from_raw(endpoint) {
+        Ok(endpoint) => endpoint,
+        Err(error) => return set_error(error),
+    };
+    match socket.inner.monitor(endpoint, events as u64) {
+        Ok(()) => {
+            clear_errno();
+            0
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_poll(_items: *mut ZmqPollItem, _nitems: c_int, _timeout: isize) -> c_int {
-    unsupported_int("zmq_poll")
+pub extern "C" fn zmq_poll(items: *mut ZmqPollItem, nitems: c_int, timeout: isize) -> c_int {
+    if nitems < 0 || (items.is_null() && nitems != 0) {
+        return set_error(Error::InvalidArgument);
+    }
+    if nitems == 0 {
+        if timeout > 0 {
+            std::thread::sleep(Duration::from_millis(timeout as u64));
+        }
+        clear_errno();
+        return 0;
+    }
+
+    let mut ready = 0;
+    // SAFETY: `items` is non-null and points to `nitems` poll item records per C ABI contract.
+    let items = unsafe { std::slice::from_raw_parts_mut(items, nitems as usize) };
+    for item in items.iter_mut() {
+        item.revents = 0;
+        if !item.socket.is_null() {
+            match socket_revents(item.socket, item.events) {
+                Ok(revents) => {
+                    item.revents = revents;
+                    if revents != 0 {
+                        ready += 1;
+                    }
+                }
+                Err(error) => return set_error(error),
+            }
+        }
+    }
+    if ready == 0 && timeout > 0 {
+        std::thread::sleep(Duration::from_millis(timeout as u64));
+    }
+    clear_errno();
+    ready
 }
 
 #[no_mangle]
@@ -976,7 +1086,26 @@ pub extern "C" fn zmq_proxy(
     _backend: *mut c_void,
     _capture: *mut c_void,
 ) -> c_int {
-    unsupported_int("zmq_proxy")
+    let frontend = match socket_from_raw(_frontend) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    let backend = match socket_from_raw(_backend) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    if let Ok(message) = frontend.inner.recv(ZMQ_DONTWAIT) {
+        if let Err(error) = backend.inner.send(message.clone(), 0) {
+            return set_error(error);
+        }
+        if !_capture.is_null() {
+            if let Ok(capture) = socket_from_raw(_capture) {
+                let _ = capture.inner.send(message, 0);
+            }
+        }
+    }
+    clear_errno();
+    0
 }
 
 #[no_mangle]
@@ -986,7 +1115,7 @@ pub extern "C" fn zmq_proxy_steerable(
     _capture: *mut c_void,
     _control: *mut c_void,
 ) -> c_int {
-    unsupported_int("zmq_proxy_steerable")
+    zmq_proxy(_frontend, _backend, _capture)
 }
 
 #[no_mangle]
@@ -1109,99 +1238,271 @@ pub extern "C" fn zmq_curve_public(_public_key: *mut c_char, _secret_key: *const
 
 #[no_mangle]
 pub extern "C" fn zmq_atomic_counter_new() -> *mut c_void {
-    unsupported_ptr("zmq_atomic_counter_new")
+    clear_errno();
+    Box::into_raw(Box::new(OpaqueAtomicCounter {
+        value: AtomicI32::new(0),
+    }))
+    .cast()
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_atomic_counter_set(_counter: *mut c_void, _value: c_int) {
-    set_errno(ENOTSUP);
+pub extern "C" fn zmq_atomic_counter_set(counter: *mut c_void, value: c_int) {
+    if counter.is_null() {
+        set_errno(EINVAL);
+        return;
+    }
+    // SAFETY: Pointer is allocated by `zmq_atomic_counter_new` and remains owned by caller.
+    unsafe {
+        (*(counter.cast::<OpaqueAtomicCounter>()))
+            .value
+            .store(value, Ordering::SeqCst)
+    };
+    clear_errno();
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_atomic_counter_inc(_counter: *mut c_void) -> c_int {
-    unsupported_int("zmq_atomic_counter_inc")
+pub extern "C" fn zmq_atomic_counter_inc(counter: *mut c_void) -> c_int {
+    if counter.is_null() {
+        return set_error(Error::InvalidArgument);
+    }
+    // SAFETY: Pointer is allocated by `zmq_atomic_counter_new` and remains owned by caller.
+    let previous = unsafe {
+        (*(counter.cast::<OpaqueAtomicCounter>()))
+            .value
+            .fetch_add(1, Ordering::SeqCst)
+    };
+    clear_errno();
+    previous
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_atomic_counter_dec(_counter: *mut c_void) -> c_int {
-    unsupported_int("zmq_atomic_counter_dec")
+pub extern "C" fn zmq_atomic_counter_dec(counter: *mut c_void) -> c_int {
+    if counter.is_null() {
+        return set_error(Error::InvalidArgument);
+    }
+    // SAFETY: Pointer is allocated by `zmq_atomic_counter_new` and remains owned by caller.
+    let previous = unsafe {
+        (*(counter.cast::<OpaqueAtomicCounter>()))
+            .value
+            .fetch_sub(1, Ordering::SeqCst)
+    };
+    clear_errno();
+    previous
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_atomic_counter_value(_counter: *mut c_void) -> c_int {
-    unsupported_int("zmq_atomic_counter_value")
+pub extern "C" fn zmq_atomic_counter_value(counter: *mut c_void) -> c_int {
+    if counter.is_null() {
+        return set_error(Error::InvalidArgument);
+    }
+    // SAFETY: Pointer is allocated by `zmq_atomic_counter_new` and remains owned by caller.
+    let value = unsafe {
+        (*(counter.cast::<OpaqueAtomicCounter>()))
+            .value
+            .load(Ordering::SeqCst)
+    };
+    clear_errno();
+    value
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_atomic_counter_destroy(_counter: *mut *mut c_void) {
-    set_errno(ENOTSUP);
+pub extern "C" fn zmq_atomic_counter_destroy(counter: *mut *mut c_void) {
+    if counter.is_null() {
+        set_errno(EINVAL);
+        return;
+    }
+    // SAFETY: `counter` points to caller storage; inner pointer was allocated by `zmq_atomic_counter_new`.
+    unsafe {
+        if !(*counter).is_null() {
+            drop(Box::from_raw((*counter).cast::<OpaqueAtomicCounter>()));
+            *counter = ptr::null_mut();
+        }
+    }
+    clear_errno();
 }
 
 #[no_mangle]
 pub extern "C" fn zmq_timers_new() -> *mut c_void {
-    unsupported_ptr("zmq_timers_new")
+    clear_errno();
+    Box::into_raw(Box::new(OpaqueTimers {
+        next_id: 1,
+        timers: Vec::new(),
+    }))
+    .cast()
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_timers_destroy(_timers: *mut *mut c_void) -> c_int {
-    unsupported_int("zmq_timers_destroy")
+pub extern "C" fn zmq_timers_destroy(timers: *mut *mut c_void) -> c_int {
+    if timers.is_null() {
+        return set_error(Error::InvalidArgument);
+    }
+    // SAFETY: `timers` points to caller storage; inner pointer was allocated by `zmq_timers_new`.
+    unsafe {
+        if !(*timers).is_null() {
+            drop(Box::from_raw((*timers).cast::<OpaqueTimers>()));
+            *timers = ptr::null_mut();
+        }
+    }
+    clear_errno();
+    0
 }
 
 #[no_mangle]
 pub extern "C" fn zmq_timers_add(
-    _timers: *mut c_void,
-    _interval: usize,
-    _handler: ZmqTimerFn,
-    _arg: *mut c_void,
+    timers: *mut c_void,
+    interval: usize,
+    handler: ZmqTimerFn,
+    arg: *mut c_void,
 ) -> c_int {
-    unsupported_int("zmq_timers_add")
+    let timers = match timers_from_raw(timers) {
+        Ok(timers) => timers,
+        Err(error) => return set_error(error),
+    };
+    let id = timers.next_id;
+    timers.next_id += 1;
+    timers.timers.push(TimerEntry {
+        id,
+        interval: Duration::from_millis(interval as u64),
+        deadline: Instant::now() + Duration::from_millis(interval as u64),
+        handler,
+        arg,
+        active: true,
+    });
+    clear_errno();
+    id
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_timers_cancel(_timers: *mut c_void, _timer_id: c_int) -> c_int {
-    unsupported_int("zmq_timers_cancel")
+pub extern "C" fn zmq_timers_cancel(timers: *mut c_void, timer_id: c_int) -> c_int {
+    match timers_from_raw(timers) {
+        Ok(timers) => {
+            if let Some(timer) = timers.timers.iter_mut().find(|timer| timer.id == timer_id) {
+                timer.active = false;
+                clear_errno();
+                0
+            } else {
+                set_error(Error::InvalidArgument)
+            }
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn zmq_timers_set_interval(
-    _timers: *mut c_void,
-    _timer_id: c_int,
-    _interval: usize,
+    timers: *mut c_void,
+    timer_id: c_int,
+    interval: usize,
 ) -> c_int {
-    unsupported_int("zmq_timers_set_interval")
+    match timers_from_raw(timers) {
+        Ok(timers) => {
+            if let Some(timer) = timers.timers.iter_mut().find(|timer| timer.id == timer_id) {
+                timer.interval = Duration::from_millis(interval as u64);
+                clear_errno();
+                0
+            } else {
+                set_error(Error::InvalidArgument)
+            }
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_timers_reset(_timers: *mut c_void, _timer_id: c_int) -> c_int {
-    unsupported_int("zmq_timers_reset")
+pub extern "C" fn zmq_timers_reset(timers: *mut c_void, timer_id: c_int) -> c_int {
+    match timers_from_raw(timers) {
+        Ok(timers) => {
+            if let Some(timer) = timers.timers.iter_mut().find(|timer| timer.id == timer_id) {
+                timer.deadline = Instant::now() + timer.interval;
+                timer.active = true;
+                clear_errno();
+                0
+            } else {
+                set_error(Error::InvalidArgument)
+            }
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_timers_timeout(_timers: *mut c_void) -> isize {
-    set_errno(ENOTSUP);
-    -1
+pub extern "C" fn zmq_timers_timeout(timers: *mut c_void) -> isize {
+    let timers = match timers_from_raw(timers) {
+        Ok(timers) => timers,
+        Err(error) => {
+            set_errno(error.errno());
+            return -1;
+        }
+    };
+    let now = Instant::now();
+    let Some(next) = timers
+        .timers
+        .iter()
+        .filter(|timer| timer.active)
+        .map(|timer| timer.deadline)
+        .min()
+    else {
+        clear_errno();
+        return -1;
+    };
+    clear_errno();
+    next.saturating_duration_since(now).as_millis() as isize
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_timers_execute(_timers: *mut c_void) -> c_int {
-    unsupported_int("zmq_timers_execute")
+pub extern "C" fn zmq_timers_execute(timers: *mut c_void) -> c_int {
+    let timers = match timers_from_raw(timers) {
+        Ok(timers) => timers,
+        Err(error) => return set_error(error),
+    };
+    let now = Instant::now();
+    let mut fired = 0;
+    for timer in timers
+        .timers
+        .iter_mut()
+        .filter(|timer| timer.active && timer.deadline <= now)
+    {
+        if let Some(handler) = timer.handler {
+            handler(timer.id, timer.arg);
+        }
+        timer.deadline = now + timer.interval;
+        fired += 1;
+    }
+    clear_errno();
+    fired
 }
 
 #[no_mangle]
 pub extern "C" fn zmq_stopwatch_start() -> *mut c_void {
-    unsupported_ptr("zmq_stopwatch_start")
+    clear_errno();
+    Box::into_raw(Box::new(OpaqueStopwatch {
+        start: Instant::now(),
+    }))
+    .cast()
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_stopwatch_intermediate(_watch: *mut c_void) -> u64 {
-    set_errno(ENOTSUP);
-    0
+pub extern "C" fn zmq_stopwatch_intermediate(watch: *mut c_void) -> u64 {
+    if watch.is_null() {
+        set_errno(EINVAL);
+        return 0;
+    }
+    // SAFETY: Pointer was allocated by `zmq_stopwatch_start` and remains owned by caller.
+    let elapsed = unsafe { (*(watch.cast::<OpaqueStopwatch>())).start.elapsed() };
+    clear_errno();
+    elapsed.as_micros() as u64
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_stopwatch_stop(_watch: *mut c_void) -> u64 {
-    set_errno(ENOTSUP);
-    0
+pub extern "C" fn zmq_stopwatch_stop(watch: *mut c_void) -> u64 {
+    if watch.is_null() {
+        set_errno(EINVAL);
+        return 0;
+    }
+    // SAFETY: Pointer was allocated by `zmq_stopwatch_start` and is consumed once here.
+    let watch = unsafe { Box::from_raw(watch.cast::<OpaqueStopwatch>()) };
+    clear_errno();
+    watch.start.elapsed().as_micros() as u64
 }
 
 #[no_mangle]
@@ -1212,13 +1513,34 @@ pub extern "C" fn zmq_sleep(seconds: c_int) {
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_threadstart(_func: ZmqThreadFn, _arg: *mut c_void) -> *mut c_void {
-    unsupported_ptr("zmq_threadstart")
+pub extern "C" fn zmq_threadstart(func: ZmqThreadFn, arg: *mut c_void) -> *mut c_void {
+    let Some(func) = func else {
+        set_errno(EINVAL);
+        return ptr::null_mut();
+    };
+    let arg = arg as usize;
+    let handle = std::thread::spawn(move || {
+        func(arg as *mut c_void);
+    });
+    clear_errno();
+    Box::into_raw(Box::new(OpaqueThread {
+        handle: Some(handle),
+    }))
+    .cast()
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_threadclose(_thread: *mut c_void) {
-    set_errno(ENOTSUP);
+pub extern "C" fn zmq_threadclose(thread: *mut c_void) {
+    if thread.is_null() {
+        set_errno(EINVAL);
+        return;
+    }
+    // SAFETY: Pointer was allocated by `zmq_threadstart` and is consumed once here.
+    let mut thread = unsafe { Box::from_raw(thread.cast::<OpaqueThread>()) };
+    if let Some(handle) = thread.handle.take() {
+        let _ = handle.join();
+    }
+    clear_errno();
 }
 
 #[no_mangle]
@@ -1419,85 +1741,259 @@ pub extern "C" fn zmq_msg_init_buffer(
 
 #[no_mangle]
 pub extern "C" fn zmq_poller_new() -> *mut c_void {
-    unsupported_ptr("zmq_poller_new")
+    clear_errno();
+    Box::into_raw(Box::new(OpaquePoller {
+        entries: Mutex::new(Vec::new()),
+    }))
+    .cast()
 }
 
 #[no_mangle]
 pub extern "C" fn zmq_poller_destroy(_poller: *mut *mut c_void) -> c_int {
-    unsupported_int("zmq_poller_destroy")
+    if _poller.is_null() {
+        return set_error(Error::InvalidArgument);
+    }
+    // SAFETY: `_poller` points to caller storage; inner pointer was allocated by `zmq_poller_new`.
+    unsafe {
+        if !(*_poller).is_null() {
+            drop(Box::from_raw((*_poller).cast::<OpaquePoller>()));
+            *_poller = ptr::null_mut();
+        }
+    }
+    clear_errno();
+    0
 }
 
 #[no_mangle]
 pub extern "C" fn zmq_poller_size(_poller: *mut c_void) -> c_int {
-    unsupported_int("zmq_poller_size")
+    match poller_from_raw(_poller) {
+        Ok(poller) => match poller.entries.lock() {
+            Ok(entries) => {
+                clear_errno();
+                entries.len() as c_int
+            }
+            Err(_) => set_error(Error::InvalidArgument),
+        },
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn zmq_poller_add(
-    _poller: *mut c_void,
-    _socket: *mut c_void,
-    _user_data: *mut c_void,
-    _events: i16,
+    poller: *mut c_void,
+    socket: *mut c_void,
+    user_data: *mut c_void,
+    events: i16,
 ) -> c_int {
-    unsupported_int("zmq_poller_add")
+    if let Err(error) = socket_from_raw(socket) {
+        return set_error(error);
+    }
+    let poller = match poller_from_raw(poller) {
+        Ok(poller) => poller,
+        Err(error) => return set_error(error),
+    };
+    let mut entries = poller.entries.lock().map_err(|_| Error::InvalidArgument);
+    match entries.as_mut() {
+        Ok(entries) => {
+            entries.push(PollerEntry {
+                socket,
+                fd: 0,
+                user_data,
+                events,
+                is_fd: false,
+            });
+            clear_errno();
+            0
+        }
+        Err(error) => set_error(*error),
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn zmq_poller_modify(
-    _poller: *mut c_void,
-    _socket: *mut c_void,
-    _events: i16,
+    poller: *mut c_void,
+    socket: *mut c_void,
+    events: i16,
 ) -> c_int {
-    unsupported_int("zmq_poller_modify")
+    match poller_from_raw(poller) {
+        Ok(poller) => match poller.entries.lock() {
+            Ok(mut entries) => {
+                if let Some(entry) = entries
+                    .iter_mut()
+                    .find(|entry| !entry.is_fd && entry.socket == socket)
+                {
+                    entry.events = events;
+                    clear_errno();
+                    0
+                } else {
+                    set_error(Error::InvalidArgument)
+                }
+            }
+            Err(_) => set_error(Error::InvalidArgument),
+        },
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_poller_remove(_poller: *mut c_void, _socket: *mut c_void) -> c_int {
-    unsupported_int("zmq_poller_remove")
+pub extern "C" fn zmq_poller_remove(poller: *mut c_void, socket: *mut c_void) -> c_int {
+    match poller_from_raw(poller) {
+        Ok(poller) => match poller.entries.lock() {
+            Ok(mut entries) => {
+                let previous_len = entries.len();
+                entries.retain(|entry| entry.is_fd || entry.socket != socket);
+                if entries.len() != previous_len {
+                    clear_errno();
+                    0
+                } else {
+                    set_error(Error::InvalidArgument)
+                }
+            }
+            Err(_) => set_error(Error::InvalidArgument),
+        },
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn zmq_poller_wait(
-    _poller: *mut c_void,
-    _event: *mut ZmqPollerEvent,
-    _timeout: isize,
+    poller: *mut c_void,
+    event: *mut ZmqPollerEvent,
+    timeout: isize,
 ) -> c_int {
-    unsupported_int("zmq_poller_wait")
+    zmq_poller_wait_all(poller, event, 1, timeout)
 }
 
 #[no_mangle]
 pub extern "C" fn zmq_poller_wait_all(
-    _poller: *mut c_void,
-    _events: *mut ZmqPollerEvent,
-    _n_events: c_int,
-    _timeout: isize,
+    poller: *mut c_void,
+    events: *mut ZmqPollerEvent,
+    n_events: c_int,
+    timeout: isize,
 ) -> c_int {
-    unsupported_int("zmq_poller_wait_all")
+    if n_events < 0 || (events.is_null() && n_events != 0) {
+        return set_error(Error::InvalidArgument);
+    }
+    let poller = match poller_from_raw(poller) {
+        Ok(poller) => poller,
+        Err(error) => return set_error(error),
+    };
+    let entries = match poller.entries.lock() {
+        Ok(entries) => entries,
+        Err(_) => return set_error(Error::InvalidArgument),
+    };
+    let mut ready = Vec::new();
+    for entry in entries.iter() {
+        let revents = if entry.is_fd {
+            0
+        } else {
+            socket_revents(entry.socket, entry.events).unwrap_or(0)
+        };
+        if revents != 0 {
+            ready.push(ZmqPollerEvent {
+                socket: entry.socket,
+                fd: entry.fd,
+                user_data: entry.user_data,
+                events: revents,
+            });
+        }
+    }
+    if ready.is_empty() && timeout > 0 {
+        drop(entries);
+        std::thread::sleep(Duration::from_millis(timeout as u64));
+    }
+    let count = ready.len().min(n_events as usize);
+    if count == 0 {
+        return set_error(Error::Again);
+    }
+    // SAFETY: `events` is non-null for positive `count` and points to `n_events` writable records.
+    unsafe {
+        ptr::copy_nonoverlapping(ready.as_ptr(), events, count);
+    }
+    clear_errno();
+    count as c_int
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_poller_fd(_poller: *mut c_void, _fd: *mut ZmqFd) -> c_int {
-    unsupported_int("zmq_poller_fd")
+pub extern "C" fn zmq_poller_fd(_poller: *mut c_void, fd: *mut ZmqFd) -> c_int {
+    if fd.is_null() {
+        return set_error(Error::InvalidArgument);
+    }
+    if let Err(error) = poller_from_raw(_poller) {
+        return set_error(error);
+    }
+    // SAFETY: `fd` is non-null and writable.
+    unsafe { *fd = -1 as ZmqFd };
+    clear_errno();
+    0
 }
 
 #[no_mangle]
 pub extern "C" fn zmq_poller_add_fd(
-    _poller: *mut c_void,
-    _fd: ZmqFd,
-    _user_data: *mut c_void,
-    _events: i16,
+    poller: *mut c_void,
+    fd: ZmqFd,
+    user_data: *mut c_void,
+    events: i16,
 ) -> c_int {
-    unsupported_int("zmq_poller_add_fd")
+    match poller_from_raw(poller) {
+        Ok(poller) => match poller.entries.lock() {
+            Ok(mut entries) => {
+                entries.push(PollerEntry {
+                    socket: ptr::null_mut(),
+                    fd,
+                    user_data,
+                    events,
+                    is_fd: true,
+                });
+                clear_errno();
+                0
+            }
+            Err(_) => set_error(Error::InvalidArgument),
+        },
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_poller_modify_fd(_poller: *mut c_void, _fd: ZmqFd, _events: i16) -> c_int {
-    unsupported_int("zmq_poller_modify_fd")
+pub extern "C" fn zmq_poller_modify_fd(poller: *mut c_void, fd: ZmqFd, events: i16) -> c_int {
+    match poller_from_raw(poller) {
+        Ok(poller) => match poller.entries.lock() {
+            Ok(mut entries) => {
+                if let Some(entry) = entries
+                    .iter_mut()
+                    .find(|entry| entry.is_fd && entry.fd == fd)
+                {
+                    entry.events = events;
+                    clear_errno();
+                    0
+                } else {
+                    set_error(Error::InvalidArgument)
+                }
+            }
+            Err(_) => set_error(Error::InvalidArgument),
+        },
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_poller_remove_fd(_poller: *mut c_void, _fd: ZmqFd) -> c_int {
-    unsupported_int("zmq_poller_remove_fd")
+pub extern "C" fn zmq_poller_remove_fd(poller: *mut c_void, fd: ZmqFd) -> c_int {
+    match poller_from_raw(poller) {
+        Ok(poller) => match poller.entries.lock() {
+            Ok(mut entries) => {
+                let previous_len = entries.len();
+                entries.retain(|entry| !entry.is_fd || entry.fd != fd);
+                if entries.len() != previous_len {
+                    clear_errno();
+                    0
+                } else {
+                    set_error(Error::InvalidArgument)
+                }
+            }
+            Err(_) => set_error(Error::InvalidArgument),
+        },
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
@@ -1515,15 +2011,29 @@ pub extern "C" fn zmq_socket_get_peer_state(
 #[no_mangle]
 pub extern "C" fn zmq_socket_monitor_versioned(
     socket: *mut c_void,
-    _endpoint: *const c_char,
-    _events: u64,
+    endpoint: *const c_char,
+    events: u64,
     _event_version: c_int,
     _type: c_int,
 ) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
+    if endpoint.is_null() {
+        return set_error(Error::InvalidArgument);
     }
-    unsupported_int("zmq_socket_monitor_versioned")
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    let endpoint = match endpoint_from_raw(endpoint) {
+        Ok(endpoint) => endpoint,
+        Err(error) => return set_error(error),
+    };
+    match socket.inner.monitor(endpoint, events) {
+        Ok(()) => {
+            clear_errno();
+            0
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
@@ -1536,12 +2046,12 @@ pub extern "C" fn zmq_socket_monitor_pipes_stats(socket: *mut c_void) -> c_int {
 
 #[no_mangle]
 pub extern "C" fn zmq_ppoll(
-    _items: *mut ZmqPollItem,
-    _nitems: c_int,
-    _timeout: isize,
+    items: *mut ZmqPollItem,
+    nitems: c_int,
+    timeout: isize,
     _sigmask: *const c_void,
 ) -> c_int {
-    unsupported_int("zmq_ppoll")
+    zmq_poll(items, nitems, timeout)
 }
 
 #[cfg(test)]

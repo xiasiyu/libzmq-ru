@@ -27,5 +27,5 @@ cargo test --workspace --all-features
 Differential runner smoke test:
 
 ```sh
-cargo run -p ru-libzmq-test-harness --bin differential-runner
+cargo run -p libzmq-test-harness --bin differential-runner
 ```

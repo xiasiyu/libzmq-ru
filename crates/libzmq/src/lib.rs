@@ -1,13 +1,13 @@
-pub use ru_libzmq_core::{constants::*, Error, Message, Result, SocketType};
+pub use libzmq_core::{constants::*, Error, Message, Result, SocketType};
 
 pub struct Context {
-    inner: ru_libzmq_core::Context,
+    inner: libzmq_core::Context,
 }
 
 impl Context {
     pub fn new() -> Result<Self> {
         Ok(Self {
-            inner: ru_libzmq_core::Context::new()?,
+            inner: libzmq_core::Context::new()?,
         })
     }
 
@@ -35,7 +35,7 @@ impl Context {
 }
 
 pub struct Socket {
-    inner: ru_libzmq_core::Socket,
+    inner: libzmq_core::Socket,
 }
 
 impl Socket {
@@ -99,7 +99,7 @@ impl Socket {
 }
 
 pub fn version() -> (i32, i32, i32) {
-    ru_libzmq_core::version()
+    libzmq_core::version()
 }
 
 #[cfg(test)]

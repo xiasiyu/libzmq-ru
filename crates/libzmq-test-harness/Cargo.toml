@@ -1,11 +1,11 @@
 [package]
-name = "ru-libzmq-test-harness"
+name = "libzmq-test-harness"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "ru_libzmq_test_harness"
+name = "libzmq_test_harness"
 
 [[bin]]
 name = "differential-runner"
@@ -36,8 +36,8 @@ name = "compare-stable-oracles"
 path = "src/bin/compare_stable_oracles.rs"
 
 [dependencies]
-ru-libzmq-core.workspace = true
-zmq = { package = "ru-libzmq-ffi", path = "../ru-libzmq-ffi" }
+libzmq-core.workspace = true
+zmq = { package = "libzmq-ffi", path = "../libzmq-ffi" }
 
 [lints]
 workspace = true
