@@ -7,18 +7,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use zmq::*;
 
 const ZMQ_HAUSNUMERO: c_int = 156_384_712;
-const ENOTSUP: c_int = ZMQ_HAUSNUMERO + 1;
 const ENOTSOCK: c_int = ZMQ_HAUSNUMERO + 9;
+const EAGAIN: c_int = 11;
 const EFAULT: c_int = 14;
 const EINVAL: c_int = 22;
 const ZMQ_PAIR: c_int = 0;
+const ZMQ_SNDMORE: c_int = 2;
 const ZMQ_MORE: c_int = 1;
+const ZMQ_RCVMORE: c_int = 13;
 const ZMQ_IO_THREADS: c_int = 1;
 const ZMQ_MAX_SOCKETS: c_int = 2;
 const ZMQ_TYPE: c_int = 16;
 const ZMQ_LINGER: c_int = 17;
 const ZMQ_SNDHWM: c_int = 23;
 const ZMQ_RCVHWM: c_int = 24;
+const ZMQ_CONFLATE: c_int = 54;
 
 static FREE_CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -218,9 +221,166 @@ fn unimplemented_socket_operations_return_explicit_error() {
     assert!(!socket.is_null());
 
     assert_eq!(zmq_send(socket, ptr::null(), 0, 0), -1);
-    assert_eq!(zmq_errno(), ENOTSUP);
+    assert_eq!(zmq_errno(), EAGAIN);
 
     assert_eq!(zmq_close(socket), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn pair_inproc_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+
+    let endpoint = c"inproc://c_pair";
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    let payload = b"hello";
+    assert_eq!(
+        zmq_send(client, payload.as_ptr().cast(), payload.len(), 0),
+        payload.len() as c_int
+    );
+
+    let mut buffer = [0u8; 16];
+    assert_eq!(
+        zmq_recv(server, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        payload.len() as c_int
+    );
+    assert_eq!(&buffer[..payload.len()], payload);
+
+    let response = b"world";
+    assert_eq!(
+        zmq_send(server, response.as_ptr().cast(), response.len(), 0),
+        response.len() as c_int
+    );
+
+    let mut buffer = [0u8; 16];
+    assert_eq!(
+        zmq_recv(client, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        response.len() as c_int
+    );
+    assert_eq!(&buffer[..response.len()], response);
+
+    assert_eq!(zmq_disconnect(client, endpoint.as_ptr()), 0);
+    assert_eq!(
+        zmq_send(client, payload.as_ptr().cast(), payload.len(), 0),
+        -1
+    );
+    assert_eq!(zmq_errno(), EAGAIN);
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn pair_inproc_multipart_more_state_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+
+    let endpoint = c"inproc://c_multipart_pair";
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    let first = b"part1";
+    let second = b"part2";
+    assert_eq!(
+        zmq_send(client, first.as_ptr().cast(), first.len(), ZMQ_SNDMORE),
+        first.len() as c_int
+    );
+    assert_eq!(
+        zmq_send(client, second.as_ptr().cast(), second.len(), 0),
+        second.len() as c_int
+    );
+
+    let mut buffer = [0u8; 16];
+    assert_eq!(
+        zmq_recv(server, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        first.len() as c_int
+    );
+    assert_eq!(&buffer[..first.len()], first);
+
+    let mut more = 0;
+    let mut size = size_of::<c_int>();
+    assert_eq!(
+        zmq_getsockopt(
+            server,
+            ZMQ_RCVMORE,
+            (&mut more as *mut c_int).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(more, 1);
+
+    assert_eq!(
+        zmq_recv(server, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        second.len() as c_int
+    );
+    assert_eq!(&buffer[..second.len()], second);
+    assert_eq!(
+        zmq_getsockopt(
+            server,
+            ZMQ_RCVMORE,
+            (&mut more as *mut c_int).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(more, 0);
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn pair_inproc_msg_send_recv_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+
+    let endpoint = c"inproc://c_msg_pair";
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    let mut outbound = MaybeUninit::<zmq_msg_t>::uninit();
+    assert_eq!(zmq_msg_init_size(outbound.as_mut_ptr(), 4), 0);
+    let mut outbound = unsafe { outbound.assume_init() };
+    unsafe {
+        ptr::copy_nonoverlapping(
+            b"ping".as_ptr(),
+            zmq_msg_data(&mut outbound).cast::<u8>(),
+            4,
+        );
+    }
+
+    assert_eq!(zmq_msg_send(&mut outbound, client, 0), 4);
+
+    let mut inbound = MaybeUninit::<zmq_msg_t>::uninit();
+    assert_eq!(zmq_msg_init(inbound.as_mut_ptr()), 0);
+    let mut inbound = unsafe { inbound.assume_init() };
+    assert_eq!(zmq_msg_recv(&mut inbound, server, 0), 4);
+    assert_eq!(zmq_msg_size(&inbound), 4);
+    let data = unsafe { std::slice::from_raw_parts(zmq_msg_data(&mut inbound).cast::<u8>(), 4) };
+    assert_eq!(data, b"ping");
+
+    assert_eq!(zmq_msg_close(&mut inbound), 0);
+    assert_eq!(zmq_msg_close(&mut outbound), 0);
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
 
@@ -294,6 +454,16 @@ fn socket_options_round_trip_over_c_abi() {
         ),
         0
     );
+    value = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            socket,
+            ZMQ_CONFLATE,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
 
     value = 0;
     size = size_of::<c_int>();
@@ -317,6 +487,16 @@ fn socket_options_round_trip_over_c_abi() {
         0
     );
     assert_eq!(value, 11);
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_CONFLATE,
+            (&mut value as *mut c_int).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(value, 1);
 
     value = -1;
     assert_eq!(

@@ -47,8 +47,16 @@ impl Socket {
         self.inner.bind(endpoint)
     }
 
+    pub fn unbind(&self, endpoint: &str) -> Result<()> {
+        self.inner.unbind(endpoint)
+    }
+
     pub fn connect(&self, endpoint: &str) -> Result<()> {
         self.inner.connect(endpoint)
+    }
+
+    pub fn disconnect(&self, endpoint: &str) -> Result<()> {
+        self.inner.disconnect(endpoint)
     }
 
     pub fn send<M>(&self, message: M) -> Result<usize>
@@ -56,6 +64,13 @@ impl Socket {
         M: Into<Message>,
     {
         self.inner.send(message.into(), 0)
+    }
+
+    pub fn send_with_flags<M>(&self, message: M, flags: i32) -> Result<usize>
+    where
+        M: Into<Message>,
+    {
+        self.inner.send(message.into(), flags)
     }
 
     pub fn recv(&self) -> Result<Message> {

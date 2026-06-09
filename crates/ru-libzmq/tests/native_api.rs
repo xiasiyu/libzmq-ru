@@ -1,6 +1,6 @@
 use ru_libzmq::{
-    version, Context, Error, Message, SocketType, ZMQ_IO_THREADS, ZMQ_LINGER, ZMQ_MAX_SOCKETS,
-    ZMQ_RCVHWM, ZMQ_SNDHWM, ZMQ_TYPE,
+    version, Context, Error, Message, SocketType, ZMQ_CONFLATE, ZMQ_IO_THREADS, ZMQ_LINGER,
+    ZMQ_MAX_SOCKETS, ZMQ_RCVHWM, ZMQ_RCVMORE, ZMQ_SNDHWM, ZMQ_SNDMORE, ZMQ_TYPE,
 };
 
 #[test]
@@ -71,19 +71,120 @@ fn native_unimplemented_socket_operations_are_explicit() {
     let ctx = Context::new().unwrap();
     let socket = ctx.socket(SocketType::Pair).unwrap();
 
+    assert_eq!(socket.bind("tcp://127.0.0.1:1"), Err(Error::NotSupported));
     assert_eq!(
-        socket.bind("inproc://phase2"),
-        Err(Error::NotImplemented("socket bind"))
+        socket.connect("tcp://127.0.0.1:1"),
+        Err(Error::NotSupported)
     );
-    assert_eq!(
-        socket.connect("inproc://phase2"),
-        Err(Error::NotImplemented("socket connect"))
-    );
-    assert_eq!(
-        socket.send("hello"),
-        Err(Error::NotImplemented("socket send"))
-    );
-    assert_eq!(socket.recv(), Err(Error::NotImplemented("socket recv")));
+    assert_eq!(socket.send("hello"), Err(Error::Again));
+    assert_eq!(socket.recv(), Err(Error::Again));
+}
+
+#[test]
+fn native_pair_inproc_round_trip() {
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    server.bind("inproc://native_pair").unwrap();
+    client.connect("inproc://native_pair").unwrap();
+
+    assert_eq!(client.send("hello").unwrap(), 5);
+    let received = server.recv().unwrap();
+    assert_eq!(received.data(), b"hello");
+
+    assert_eq!(server.send("world").unwrap(), 5);
+    let received = client.recv().unwrap();
+    assert_eq!(received.data(), b"world");
+}
+
+#[test]
+fn native_pair_inproc_supports_pending_connect() {
+    let ctx = Context::new().unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+
+    client.connect("inproc://native_pending_pair").unwrap();
+    assert_eq!(client.send("early"), Err(Error::Again));
+
+    server.bind("inproc://native_pending_pair").unwrap();
+
+    assert_eq!(client.send("ready").unwrap(), 5);
+    let received = server.recv().unwrap();
+    assert_eq!(received.data(), b"ready");
+}
+
+#[test]
+fn native_pair_inproc_enforces_send_hwm() {
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    client.set_option_i32(ZMQ_SNDHWM, 1).unwrap();
+    server.bind("inproc://native_hwm_pair").unwrap();
+    client.connect("inproc://native_hwm_pair").unwrap();
+
+    assert_eq!(client.send("one").unwrap(), 3);
+    assert_eq!(client.send("two"), Err(Error::Again));
+    let received = server.recv().unwrap();
+    assert_eq!(received.data(), b"one");
+}
+
+#[test]
+fn native_pair_inproc_conflate_keeps_latest_message() {
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    client.set_option_i32(ZMQ_SNDHWM, 1).unwrap();
+    client.set_option_i32(ZMQ_CONFLATE, 1).unwrap();
+    server.bind("inproc://native_conflate_pair").unwrap();
+    client.connect("inproc://native_conflate_pair").unwrap();
+
+    assert_eq!(client.send("one").unwrap(), 3);
+    assert_eq!(client.send("two").unwrap(), 3);
+    let received = server.recv().unwrap();
+    assert_eq!(received.data(), b"two");
+    assert_eq!(server.recv(), Err(Error::Again));
+}
+
+#[test]
+fn native_pair_inproc_disconnect_removes_peer() {
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    server.bind("inproc://native_disconnect_pair").unwrap();
+    client.connect("inproc://native_disconnect_pair").unwrap();
+    client
+        .disconnect("inproc://native_disconnect_pair")
+        .unwrap();
+
+    assert_eq!(client.send("late"), Err(Error::Again));
+    assert_eq!(server.send("late"), Err(Error::Again));
+}
+
+#[test]
+fn native_pair_inproc_preserves_multipart_more_state() {
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    server.bind("inproc://native_multipart_pair").unwrap();
+    client.connect("inproc://native_multipart_pair").unwrap();
+
+    assert_eq!(client.send_with_flags("part1", ZMQ_SNDMORE).unwrap(), 5);
+    assert_eq!(client.send("part2").unwrap(), 5);
+
+    let received = server.recv().unwrap();
+    assert_eq!(received.data(), b"part1");
+    assert!(received.more());
+    assert_eq!(server.get_option_i32(ZMQ_RCVMORE).unwrap(), 1);
+
+    let received = server.recv().unwrap();
+    assert_eq!(received.data(), b"part2");
+    assert!(!received.more());
+    assert_eq!(server.get_option_i32(ZMQ_RCVMORE).unwrap(), 0);
 }
 
 #[test]

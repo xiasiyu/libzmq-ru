@@ -194,6 +194,38 @@ impl FfiMessageInner {
         Ok(())
     }
 
+    fn to_core_message(&self) -> Result<Message, Error> {
+        let data = match &self.storage {
+            MessageStorage::Owned(message) => message.data().to_vec(),
+            MessageStorage::External(external) => {
+                if external.data.is_null() && external.size != 0 {
+                    return Err(Error::InvalidArgument);
+                }
+                if external.size == 0 {
+                    Vec::new()
+                } else {
+                    // SAFETY: External message storage is caller-provided as valid for `size` bytes until close.
+                    unsafe { std::slice::from_raw_parts(external.data.cast::<u8>(), external.size) }
+                        .to_vec()
+                }
+            }
+        };
+        let mut message = Message::from_vec(data);
+        message.set_more(self.more);
+        Ok(message)
+    }
+
+    fn from_core_message(message: Message) -> Self {
+        let more = message.more();
+        Self {
+            storage: MessageStorage::Owned(message),
+            more,
+            routing_id: 0,
+            group: None,
+            metadata: Vec::new(),
+        }
+    }
+
     fn metadata(&self, key: &[u8]) -> Option<&CString> {
         self.metadata
             .iter()
@@ -714,27 +746,62 @@ pub extern "C" fn zmq_msg_gets(msg: *const zmq_msg_t, _property: *const c_char) 
 #[no_mangle]
 pub extern "C" fn zmq_send(
     socket: *mut c_void,
-    _buf: *const c_void,
-    _len: usize,
-    _flags: c_int,
+    buf: *const c_void,
+    len: usize,
+    flags: c_int,
 ) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    if buf.is_null() && len != 0 {
+        return set_error(Error::InvalidArgument);
     }
-    set_error(Error::NotImplemented("zmq_send"))
+    let bytes = if len == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: `buf` was checked non-null for non-zero `len` and is read-only for `len` bytes.
+        unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), len).to_vec() }
+    };
+    let mut message = Message::from_vec(bytes);
+    message.set_more(flags & ZMQ_SNDMORE != 0);
+    match socket.inner.send(message, flags) {
+        Ok(size) => {
+            clear_errno();
+            size as c_int
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn zmq_recv(
     socket: *mut c_void,
-    _buf: *mut c_void,
-    _len: usize,
-    _flags: c_int,
+    buf: *mut c_void,
+    len: usize,
+    flags: c_int,
 ) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    if buf.is_null() && len != 0 {
+        return set_error(Error::InvalidArgument);
     }
-    set_error(Error::NotImplemented("zmq_recv"))
+    match socket.inner.recv(flags) {
+        Ok(message) => {
+            let copy_len = len.min(message.len());
+            if copy_len != 0 {
+                // SAFETY: `buf` was checked non-null for non-zero `len`, and `copy_len <= len`.
+                unsafe {
+                    ptr::copy_nonoverlapping(message.data().as_ptr(), buf.cast::<u8>(), copy_len);
+                }
+            }
+            clear_errno();
+            message.len() as c_int
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
@@ -796,19 +863,41 @@ pub extern "C" fn zmq_getsockopt(
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_unbind(socket: *mut c_void, _endpoint: *const c_char) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
+pub extern "C" fn zmq_unbind(socket: *mut c_void, endpoint: *const c_char) -> c_int {
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    let endpoint = match endpoint_from_raw(endpoint) {
+        Ok(endpoint) => endpoint,
+        Err(error) => return set_error(error),
+    };
+    match socket.inner.unbind(endpoint) {
+        Ok(()) => {
+            clear_errno();
+            0
+        }
+        Err(error) => set_error(error),
     }
-    unsupported_int("zmq_unbind")
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_disconnect(socket: *mut c_void, _endpoint: *const c_char) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
+pub extern "C" fn zmq_disconnect(socket: *mut c_void, endpoint: *const c_char) -> c_int {
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    let endpoint = match endpoint_from_raw(endpoint) {
+        Ok(endpoint) => endpoint,
+        Err(error) => return set_error(error),
+    };
+    match socket.inner.disconnect(endpoint) {
+        Ok(()) => {
+            clear_errno();
+            0
+        }
+        Err(error) => set_error(error),
     }
-    unsupported_int("zmq_disconnect")
 }
 
 #[no_mangle]
@@ -868,19 +957,61 @@ pub extern "C" fn zmq_device(_type: c_int, _frontend: *mut c_void, _backend: *mu
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_sendmsg(socket: *mut c_void, _msg: *mut zmq_msg_t, _flags: c_int) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
+pub extern "C" fn zmq_sendmsg(socket: *mut c_void, msg: *mut zmq_msg_t, flags: c_int) -> c_int {
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    if msg.is_null() {
+        return set_error(Error::InvalidArgument);
     }
-    unsupported_int("zmq_sendmsg")
+    let inner = read_msg_inner(msg.cast_const());
+    if inner.is_null() {
+        return set_error(Error::InvalidArgument);
+    }
+    // SAFETY: Non-null message inner pointer is owned by `msg` until close/move.
+    let message = match unsafe { (*inner).to_core_message() } {
+        Ok(message) => message,
+        Err(error) => return set_error(error),
+    };
+    let send_flags = flags | if message.more() { ZMQ_SNDMORE } else { 0 };
+    match socket.inner.send(message, send_flags) {
+        Ok(size) => {
+            clear_errno();
+            size as c_int
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_recvmsg(socket: *mut c_void, _msg: *mut zmq_msg_t, _flags: c_int) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
+pub extern "C" fn zmq_recvmsg(socket: *mut c_void, msg: *mut zmq_msg_t, flags: c_int) -> c_int {
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    if msg.is_null() {
+        return set_error(Error::InvalidArgument);
     }
-    unsupported_int("zmq_recvmsg")
+    match socket.inner.recv(flags) {
+        Ok(message) => {
+            let size = message.len();
+            let previous = take_msg_inner(msg);
+            if !previous.is_null() {
+                // SAFETY: Previous message inner pointer is owned by `msg` and is being replaced.
+                unsafe {
+                    drop(Box::from_raw(previous));
+                }
+            }
+            write_msg_inner(
+                msg,
+                Box::into_raw(Box::new(FfiMessageInner::from_core_message(message))),
+            );
+            clear_errno();
+            size as c_int
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]

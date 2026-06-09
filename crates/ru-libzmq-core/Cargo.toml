@@ -9,3 +9,6 @@ name = "ru_libzmq_core"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+loom = "0.7"

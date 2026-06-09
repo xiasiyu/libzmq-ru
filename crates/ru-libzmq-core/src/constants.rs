@@ -86,4 +86,5 @@ pub const ZMQ_SNDHWM: i32 = 23;
 pub const ZMQ_RCVHWM: i32 = 24;
 pub const ZMQ_RCVTIMEO: i32 = 27;
 pub const ZMQ_SNDTIMEO: i32 = 28;
+pub const ZMQ_CONFLATE: i32 = 54;
 pub const ZMQ_THREAD_SAFE: i32 = 81;

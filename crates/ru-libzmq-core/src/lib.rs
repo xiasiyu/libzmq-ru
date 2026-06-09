@@ -2,6 +2,7 @@ pub mod constants;
 pub mod context;
 pub mod error;
 pub mod message;
+pub mod pipe;
 pub mod socket;
 
 pub use constants::*;

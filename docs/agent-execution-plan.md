@@ -176,33 +176,35 @@ Completion checks:
 
 Status note: Phase 4 completed with default and all-feature workspace tests passing. Context options and basic socket integer options are implemented for both Rust-native and C ABI callers. Socket creation covers stable and draft socket type values; transport behavior remains intentionally unimplemented until later phases.
 
-## Phase 5: Pipe, Mailbox, Inproc [~]
+## Phase 5: Pipe, Mailbox, Inproc [x]
 
 Goal: implement the first real messaging path without OS networking.
 
-- [ ] Implement `ypipe`.
-- [ ] Implement `yqueue`.
-- [ ] Implement pipe pair creation.
-- [ ] Implement pipe HWM and LWM.
-- [ ] Implement pipe conflate mode.
-- [ ] Implement multipart pipe behavior.
-- [ ] Implement pipe delimiter termination.
-- [ ] Implement mailbox.
-- [ ] Implement command queue.
-- [ ] Implement context endpoint registry.
-- [ ] Implement pending inproc connection handling.
-- [ ] Implement `inproc://` bind.
-- [ ] Implement `inproc://` connect.
-- [ ] Implement `inproc://` disconnect.
-- [ ] Add loom model for pipe behavior.
-- [ ] Add loom model for mailbox shutdown behavior.
+- [x] Implement `ypipe`.
+- [x] Implement `yqueue`.
+- [x] Implement pipe pair creation.
+- [x] Implement pipe HWM and LWM.
+- [x] Implement pipe conflate mode.
+- [x] Implement multipart pipe behavior.
+- [x] Implement pipe delimiter termination.
+- [x] Implement mailbox.
+- [x] Implement command queue.
+- [x] Implement context endpoint registry.
+- [x] Implement pending inproc connection handling.
+- [x] Implement `inproc://` bind.
+- [x] Implement `inproc://` connect.
+- [x] Implement `inproc://` disconnect.
+- [x] Add loom model for pipe behavior.
+- [x] Add loom model for mailbox shutdown behavior.
 
 Completion checks:
 
-- [ ] `cargo fmt --all`
-- [ ] `cargo test --workspace`
-- [ ] PAIR inproc tests pass.
-- [ ] HWM and conflate tests pass.
+- [x] `cargo fmt --all`
+- [x] `cargo test --workspace`
+- [x] PAIR inproc tests pass.
+- [x] HWM and conflate tests pass.
+
+Status note: Phase 5 completed with a tested in-memory PAIR path for Rust-native and C ABI callers, including `inproc://` bind/connect/disconnect, pending connects, send-side HWM, conflate, multipart `RCVMORE` state, message send/recv over the C ABI, queue/mailbox primitives, delimiter termination, and loom coverage for pipe/mailbox shutdown behavior.
 
 ## Phase 6: Stable Socket Patterns [ ]
 
