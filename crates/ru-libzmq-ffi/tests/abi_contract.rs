@@ -96,6 +96,8 @@ fn message_copy_clones_payload_without_taking_external_callback_ownership() {
 
     assert_eq!(zmq_msg_copy(&mut copy, &mut original), 0);
     assert_eq!(zmq_msg_size(&copy), data.len());
+    assert_eq!(zmq_msg_data(&mut copy), data.as_mut_ptr().cast());
+    assert_eq!(zmq_msg_data(&mut original), data.as_mut_ptr().cast());
     assert_eq!(FREE_CALLBACK_COUNT.load(Ordering::SeqCst), 0);
 
     assert_eq!(zmq_msg_close(&mut copy), 0);
@@ -120,6 +122,34 @@ fn message_move_transfers_payload_and_resets_source_to_empty() {
 
     assert_eq!(zmq_msg_close(&mut dest), 0);
     assert_eq!(zmq_msg_close(&mut source), 0);
+}
+
+#[test]
+fn message_lifecycle_matrix_preserves_size_and_close_behavior() {
+    for size in [0usize, 1, 8, 31, 32, 33, 64, 1024] {
+        let mut source = MaybeUninit::<zmq_msg_t>::uninit();
+        let mut copy = MaybeUninit::<zmq_msg_t>::uninit();
+        let mut moved = MaybeUninit::<zmq_msg_t>::uninit();
+
+        assert_eq!(zmq_msg_init_size(source.as_mut_ptr(), size), 0);
+        assert_eq!(zmq_msg_init(copy.as_mut_ptr()), 0);
+        assert_eq!(zmq_msg_init(moved.as_mut_ptr()), 0);
+
+        let mut source = unsafe { source.assume_init() };
+        let mut copy = unsafe { copy.assume_init() };
+        let mut moved = unsafe { moved.assume_init() };
+
+        assert_eq!(zmq_msg_size(&source), size);
+        assert_eq!(zmq_msg_copy(&mut copy, &mut source), 0);
+        assert_eq!(zmq_msg_size(&copy), size);
+        assert_eq!(zmq_msg_move(&mut moved, &mut source), 0);
+        assert_eq!(zmq_msg_size(&moved), size);
+        assert_eq!(zmq_msg_size(&source), 0);
+
+        assert_eq!(zmq_msg_close(&mut copy), 0);
+        assert_eq!(zmq_msg_close(&mut moved), 0);
+        assert_eq!(zmq_msg_close(&mut source), 0);
+    }
 }
 
 #[test]

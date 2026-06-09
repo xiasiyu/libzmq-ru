@@ -4,6 +4,7 @@ use std::cell::Cell;
 use std::convert::TryFrom;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
+use std::sync::Arc;
 
 thread_local! {
     static LAST_ERRNO: Cell<c_int> = Cell::new(0);
@@ -74,12 +75,22 @@ struct OpaqueSocket {
 
 enum MessageStorage {
     Owned(Message),
-    External {
-        data: *mut c_void,
-        size: usize,
-        free_fn: ZmqFreeFn,
-        hint: *mut c_void,
-    },
+    External(Arc<ExternalMessage>),
+}
+
+struct ExternalMessage {
+    data: *mut c_void,
+    size: usize,
+    free_fn: ZmqFreeFn,
+    hint: *mut c_void,
+}
+
+impl Drop for ExternalMessage {
+    fn drop(&mut self) {
+        if let Some(free_fn) = self.free_fn {
+            free_fn(self.data, self.hint);
+        }
+    }
 }
 
 struct FfiMessageInner {
@@ -118,12 +129,12 @@ impl FfiMessageInner {
         hint: *mut c_void,
     ) -> Self {
         Self {
-            storage: MessageStorage::External {
+            storage: MessageStorage::External(Arc::new(ExternalMessage {
                 data,
                 size,
                 free_fn,
                 hint,
-            },
+            })),
             more: false,
             routing_id: 0,
             group: None,
@@ -134,32 +145,27 @@ impl FfiMessageInner {
     fn data(&mut self) -> *mut c_void {
         match &mut self.storage {
             MessageStorage::Owned(message) => message.data_mut().as_mut_ptr().cast(),
-            MessageStorage::External { data, .. } => *data,
+            MessageStorage::External(external) => external.data,
         }
     }
 
     fn size(&self) -> usize {
         match &self.storage {
             MessageStorage::Owned(message) => message.len(),
-            MessageStorage::External { size, .. } => *size,
+            MessageStorage::External(external) => external.size,
         }
     }
 
-    fn copy_owned(&self) -> Self {
-        let bytes = match &self.storage {
-            MessageStorage::Owned(message) => message.data().to_vec(),
-            MessageStorage::External { data, size, .. } => {
-                if *size == 0 {
-                    Vec::new()
-                } else {
-                    // SAFETY: External message storage is valid for `size` bytes until the message is closed.
-                    unsafe { std::slice::from_raw_parts((*data).cast::<u8>(), *size).to_vec() }
-                }
+    fn copy_message(&self) -> Self {
+        let storage = match &self.storage {
+            MessageStorage::Owned(message) => {
+                MessageStorage::Owned(Message::from_vec(message.data().to_vec()))
             }
+            MessageStorage::External(external) => MessageStorage::External(Arc::clone(external)),
         };
 
         Self {
-            storage: MessageStorage::Owned(Message::from_vec(bytes)),
+            storage,
             more: self.more,
             routing_id: self.routing_id,
             group: self.group.clone(),
@@ -193,20 +199,6 @@ impl FfiMessageInner {
             .iter()
             .find(|(stored_key, _)| stored_key.as_bytes() == key)
             .map(|(_, value)| value)
-    }
-}
-
-impl Drop for FfiMessageInner {
-    fn drop(&mut self) {
-        if let MessageStorage::External {
-            data,
-            free_fn: Some(free_fn),
-            hint,
-            ..
-        } = &mut self.storage
-        {
-            free_fn(*data, *hint);
-        }
     }
 }
 
@@ -612,7 +604,7 @@ pub extern "C" fn zmq_msg_copy(dest: *mut zmq_msg_t, src: *mut zmq_msg_t) -> c_i
         return set_error(Error::InvalidArgument);
     }
     // SAFETY: Non-null source message inner pointer is owned by `src` until close/move.
-    let copied = unsafe { (*src_inner).copy_owned() };
+    let copied = unsafe { (*src_inner).copy_message() };
     write_msg_inner(dest, Box::into_raw(Box::new(copied)));
     clear_errno();
     0

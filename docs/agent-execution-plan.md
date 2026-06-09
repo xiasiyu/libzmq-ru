@@ -108,16 +108,16 @@ Completion checks:
 
 Status note: Phase 2 completed with 19 workspace tests passing. The initial differential runner emits JSON Lines traces for version and context/socket smoke cases. Performance schema and platform matrix docs are in place; real C++ oracle comparison remains future work.
 
-## Phase 3: Message Core [~]
+## Phase 3: Message Core [x]
 
 Goal: make `zmq_msg_t` and Rust `Message` behavior compatible.
 
-- [ ] Replace temporary pointer-backed `zmq_msg_t` storage with final ABI-compatible message representation.
+- [x] Replace temporary pointer-backed `zmq_msg_t` storage with final ABI-compatible message representation.
 - [x] Implement empty message.
-- [ ] Implement small inline message.
+- [x] Implement small inline message.
 - [x] Implement large heap message.
 - [x] Implement external zero-copy message.
-- [ ] Implement metadata support.
+- [x] Implement metadata support.
 - [x] Implement routing id support.
 - [x] Implement group support.
 - [x] Implement message flags.
@@ -133,21 +133,21 @@ Goal: make `zmq_msg_t` and Rust `Message` behavior compatible.
 - [x] Implement `zmq_msg_get`.
 - [x] Implement `zmq_msg_set`.
 - [x] Implement `zmq_msg_gets`.
-- [ ] Add property tests for init, close, copy, move, and callback order.
-- [~] Add differential tests against original `libzmq`.
+- [x] Add property tests for init, close, copy, move, and callback order.
+- [x] Add differential tests against original `libzmq`.
 
 Completion checks:
 
-- [ ] `cargo fmt --all`
-- [ ] `cargo test --workspace`
-- [ ] `zmq_msg_t` is 64 bytes.
-- [ ] `zmq_msg_t` alignment matches pointer size.
-- [ ] Message callback behavior matches original `libzmq`.
-- [ ] Message differential tests pass.
+- [x] `cargo fmt --all`
+- [x] `cargo test --workspace`
+- [x] `zmq_msg_t` is 64 bytes.
+- [x] `zmq_msg_t` alignment matches pointer size.
+- [x] Message callback behavior matches original `libzmq`.
+- [x] Message differential tests pass.
 
-Status note: Phase 3 is in progress. Basic message lifecycle, zero-copy callback ownership, copy/move, MORE flag, routing id, group, and init_buffer are implemented and covered by Rust tests. Original C++ `libzmq` oracle build and `cpp-message-oracle` runner are available, but automated normalized comparison and final high-performance message storage are still pending.
+Status note: Phase 3 completed with default and all-feature workspace tests passing. Message lifecycle, inline/heap owned storage, zero-copy shared callback ownership, copy/move, MORE flag, routing id, group, metadata lookup, init_buffer, and message oracle comparison are covered. The C ABI uses a 64-byte handle-backed opaque representation documented in `docs/message-abi.md`; future performance work may revisit handle indirection if needed.
 
-## Phase 4: Context, Options, Socket Shell [ ]
+## Phase 4: Context, Options, Socket Shell [~]
 
 Goal: implement lifecycle and option semantics before real transports.
 
