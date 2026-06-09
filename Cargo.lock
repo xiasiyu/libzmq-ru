@@ -23,3 +23,11 @@ dependencies = [
 [[package]]
 name = "ru-libzmq-sys"
 version = "0.1.0"
+
+[[package]]
+name = "ru-libzmq-test-harness"
+version = "0.1.0"
+dependencies = [
+ "ru-libzmq-core",
+ "ru-libzmq-ffi",
+]

@@ -1,0 +1,31 @@
+[package]
+name = "ru-libzmq-test-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ru_libzmq_test_harness"
+
+[[bin]]
+name = "differential-runner"
+path = "src/bin/differential_runner.rs"
+
+[[bin]]
+name = "cpp-message-oracle"
+path = "src/bin/cpp_message_oracle.rs"
+
+[[bin]]
+name = "rust-message-oracle"
+path = "src/bin/rust_message_oracle.rs"
+
+[[bin]]
+name = "compare-message-oracles"
+path = "src/bin/compare_message_oracles.rs"
+
+[dependencies]
+ru-libzmq-core.workspace = true
+zmq = { package = "ru-libzmq-ffi", path = "../ru-libzmq-ffi" }
+
+[lints]
+workspace = true

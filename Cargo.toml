@@ -4,6 +4,7 @@ members = [
     "crates/ru-libzmq",
     "crates/ru-libzmq-ffi",
     "crates/ru-libzmq-sys",
+    "crates/ru-libzmq-test-harness",
 ]
 resolver = "2"
 

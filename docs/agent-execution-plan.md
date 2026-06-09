@@ -1,0 +1,483 @@
+# Agent Execution Plan
+
+This document is the execution checklist for the full Rust rewrite of `libzmq` in `ru-libzmq`.
+
+Agents must update this file after each completed task. Mark completed items with `[x]`, keep incomplete items as `[ ]`, and use `[~]` for the current phase. Do not mark a phase complete unless its completion checks pass.
+
+## Status Legend
+
+- `[ ]` Not started
+- `[~]` In progress
+- `[x]` Completed
+- `[!]` Blocked
+
+## Global Requirements
+
+- [~] Preserve original `libzmq` C ABI, including stable, deprecated, and draft APIs.
+- [ ] Add Rust-native API backed by the same Rust core.
+- [ ] Reimplement tests in Rust.
+- [ ] Support Linux, macOS, and Windows from the start.
+- [ ] Support full feature scope: draft, curve, gssapi, ws, wss, udp, openpgm, norm, tipc, vmci, vsock.
+- [ ] Keep performance regression below 5% versus original C++ `libzmq`.
+- [ ] Keep handwritten unsafe code below 10%.
+- [ ] Keep unsafe isolated to `ffi`, `sys`, platform, and crypto/syscall boundaries.
+- [x] Run `cargo fmt --all` before every completed phase.
+- [x] Run `cargo test --workspace` before every completed phase.
+- [x] Run `cargo test --workspace --all-features` once full-feature modules exist.
+
+## Current Completed Work
+
+- [x] Created Rust workspace in `ru-libzmq`.
+- [x] Added `ru-libzmq-core`.
+- [x] Added `ru-libzmq`.
+- [x] Added `ru-libzmq-ffi`.
+- [x] Added `ru-libzmq-sys`.
+- [x] Added initial `include/zmq.h`, `zmq_utils.h`, and `zmq_draft.h`.
+- [x] Added initial Rust-native `Context`, `Socket`, `Message`, and `SocketType`.
+- [x] Added initial C ABI exports for version, errno, context, socket creation, close, and basic message lifecycle.
+- [x] Added implementation, testing, and unsafe policy docs.
+- [x] Installed Rust toolchain.
+- [x] Verified `cargo fmt --all && cargo test --workspace`.
+
+## Agent Operating Protocol
+
+- [x] Before editing, read the relevant source and original `libzmq` files.
+- [x] Before implementing a module, add or update Rust tests that define expected behavior.
+- [x] Prefer minimal correct changes.
+- [x] Do not mark a task complete unless tests for that task pass.
+- [ ] Do not claim compatibility unless behavior is checked against original `libzmq`.
+- [ ] Do not introduce unsafe outside approved unsafe islands.
+- [ ] If a behavior differs from original `libzmq`, document the difference and stop unless explicitly approved.
+- [x] After each phase, update this checklist and add a short status note.
+
+## Phase 1: ABI Contract Freeze [x]
+
+Goal: make the public compatibility target explicit and testable.
+
+- [x] Copy the full public API surface from original `libzmq/include/zmq.h`.
+- [x] Copy or mirror all stable constants.
+- [x] Copy or mirror all deprecated constants and aliases.
+- [x] Copy or mirror all draft constants and API declarations.
+- [x] Add complete C ABI symbol checklist.
+- [x] Add `zmq_msg_t` size and alignment tests.
+- [x] Add tests for version API.
+- [x] Add tests for errno API.
+- [x] Add tests for context API null pointer behavior.
+- [x] Add tests for invalid socket pointer behavior.
+- [x] Add tests for invalid socket type behavior.
+- [x] Add tests proving unimplemented APIs return explicit errors, not fake success.
+- [x] Add ABI checklist status table in docs.
+
+Completion checks:
+
+- [x] `cargo fmt --all`
+- [x] `cargo test --workspace`
+- [x] ABI checklist exists.
+- [x] All currently exported symbols are covered by at least one Rust ABI test.
+
+Status note: Phase 1 completed with 13 workspace tests passing. The C ABI header and exported symbol surface are frozen for the current rewrite. Most non-core behavior remains stubbed and intentionally returns explicit unsupported errors until later implementation phases.
+
+## Phase 2: Rust Test and Differential Baseline [x]
+
+Goal: build the testing harness before migrating complex behavior.
+
+- [x] Create `tests/abi`.
+- [x] Create `tests/native`.
+- [x] Create `tests/differential`.
+- [x] Create `tests/interop`.
+- [x] Create `benches`.
+- [x] Create `fuzz` scaffold.
+- [x] Add Rust ABI tests for `test_system` equivalent.
+- [x] Add Rust ABI tests for `test_msg_init` equivalent.
+- [x] Add Rust ABI tests for `test_msg_flags` equivalent.
+- [x] Add Rust ABI tests for `test_msg_ffn` equivalent.
+- [x] Add Rust ABI tests for `test_ctx_options` equivalent.
+- [x] Add Rust ABI tests for `test_socket_null` equivalent.
+- [x] Add runner design for original C++ `libzmq` oracle.
+- [x] Add trace format for differential comparisons.
+- [x] Add performance result JSON or CSV schema.
+- [x] Add platform matrix notes for Linux, macOS, and Windows.
+
+Completion checks:
+
+- [x] `cargo fmt --all`
+- [x] `cargo test --workspace`
+- [x] Basic Rust ABI tests pass.
+- [x] Differential runner can be invoked, even if most cases are pending.
+- [x] Performance baseline schema exists.
+
+Status note: Phase 2 completed with 19 workspace tests passing. The initial differential runner emits JSON Lines traces for version and context/socket smoke cases. Performance schema and platform matrix docs are in place; real C++ oracle comparison remains future work.
+
+## Phase 3: Message Core [~]
+
+Goal: make `zmq_msg_t` and Rust `Message` behavior compatible.
+
+- [ ] Replace temporary pointer-backed `zmq_msg_t` storage with final ABI-compatible message representation.
+- [x] Implement empty message.
+- [ ] Implement small inline message.
+- [x] Implement large heap message.
+- [x] Implement external zero-copy message.
+- [ ] Implement metadata support.
+- [x] Implement routing id support.
+- [x] Implement group support.
+- [x] Implement message flags.
+- [x] Implement `zmq_msg_init`.
+- [x] Implement `zmq_msg_init_size`.
+- [x] Implement `zmq_msg_init_data`.
+- [x] Implement `zmq_msg_close`.
+- [x] Implement `zmq_msg_move`.
+- [x] Implement `zmq_msg_copy`.
+- [x] Implement `zmq_msg_data`.
+- [x] Implement `zmq_msg_size`.
+- [x] Implement `zmq_msg_more`.
+- [x] Implement `zmq_msg_get`.
+- [x] Implement `zmq_msg_set`.
+- [x] Implement `zmq_msg_gets`.
+- [ ] Add property tests for init, close, copy, move, and callback order.
+- [~] Add differential tests against original `libzmq`.
+
+Completion checks:
+
+- [ ] `cargo fmt --all`
+- [ ] `cargo test --workspace`
+- [ ] `zmq_msg_t` is 64 bytes.
+- [ ] `zmq_msg_t` alignment matches pointer size.
+- [ ] Message callback behavior matches original `libzmq`.
+- [ ] Message differential tests pass.
+
+Status note: Phase 3 is in progress. Basic message lifecycle, zero-copy callback ownership, copy/move, MORE flag, routing id, group, and init_buffer are implemented and covered by Rust tests. Original C++ `libzmq` oracle build and `cpp-message-oracle` runner are available, but automated normalized comparison and final high-performance message storage are still pending.
+
+## Phase 4: Context, Options, Socket Shell [ ]
+
+Goal: implement lifecycle and option semantics before real transports.
+
+- [ ] Implement context state machine.
+- [ ] Implement context shutdown behavior.
+- [ ] Implement context termination behavior.
+- [ ] Implement legacy `zmq_init`.
+- [ ] Implement legacy `zmq_term`.
+- [ ] Implement legacy `zmq_ctx_destroy`.
+- [ ] Implement context options.
+- [ ] Implement socket options defaults.
+- [ ] Implement socket option validation.
+- [ ] Implement socket factory for all stable socket types.
+- [ ] Implement socket factory for all draft socket types.
+- [ ] Implement invalid option errno behavior.
+- [ ] Implement invalid option size errno behavior.
+- [ ] Implement Rust-native option API.
+
+Completion checks:
+
+- [ ] `cargo fmt --all`
+- [ ] `cargo test --workspace`
+- [ ] Context lifecycle tests pass.
+- [ ] Socket creation tests pass for stable and draft types.
+- [ ] Option tests pass for defaults, valid values, invalid values, and invalid sizes.
+
+## Phase 5: Pipe, Mailbox, Inproc [ ]
+
+Goal: implement the first real messaging path without OS networking.
+
+- [ ] Implement `ypipe`.
+- [ ] Implement `yqueue`.
+- [ ] Implement pipe pair creation.
+- [ ] Implement pipe HWM and LWM.
+- [ ] Implement pipe conflate mode.
+- [ ] Implement multipart pipe behavior.
+- [ ] Implement pipe delimiter termination.
+- [ ] Implement mailbox.
+- [ ] Implement command queue.
+- [ ] Implement context endpoint registry.
+- [ ] Implement pending inproc connection handling.
+- [ ] Implement `inproc://` bind.
+- [ ] Implement `inproc://` connect.
+- [ ] Implement `inproc://` disconnect.
+- [ ] Add loom model for pipe behavior.
+- [ ] Add loom model for mailbox shutdown behavior.
+
+Completion checks:
+
+- [ ] `cargo fmt --all`
+- [ ] `cargo test --workspace`
+- [ ] PAIR inproc tests pass.
+- [ ] HWM and conflate tests pass.
+
+## Phase 6: Stable Socket Patterns [ ]
+
+Goal: migrate main stable socket business logic.
+
+- [ ] Implement PAIR.
+- [ ] Implement PUSH.
+- [ ] Implement PULL.
+- [ ] Implement DEALER.
+- [ ] Implement ROUTER.
+- [ ] Implement REQ.
+- [ ] Implement REP.
+- [ ] Implement PUB.
+- [ ] Implement SUB.
+- [ ] Implement XPUB.
+- [ ] Implement XSUB.
+- [ ] Implement STREAM.
+- [ ] Implement fair queue scheduler.
+- [ ] Implement load balancer scheduler.
+- [ ] Implement distributor scheduler.
+- [ ] Implement ROUTER routing id behavior.
+- [ ] Implement ROUTER mandatory behavior.
+- [ ] Implement ROUTER handover behavior.
+- [ ] Implement REQ strict FSM.
+- [ ] Implement REQ relaxed behavior.
+- [ ] Implement REQ correlate behavior.
+- [ ] Implement REP FSM and traceback.
+- [ ] Implement PUB/SUB filtering.
+- [ ] Implement XPUB verbose behavior.
+- [ ] Implement XPUB manual behavior.
+- [ ] Implement XPUB nodrop behavior.
+- [ ] Implement XPUB welcome message behavior.
+- [ ] Implement XSUB subscription replay.
+
+Completion checks:
+
+- [ ] `cargo fmt --all`
+- [ ] `cargo test --workspace`
+- [ ] Stable socket pattern tests pass for inproc.
+- [ ] Differential tests pass for stable socket patterns.
+- [ ] Multipart behavior matches original `libzmq`.
+- [ ] FSM errno behavior matches original `libzmq`.
+
+## Phase 7: Poller, Proxy, Monitor, Timers [ ]
+
+Goal: implement common control-plane APIs.
+
+- [ ] Implement `zmq_poll`.
+- [ ] Implement `zmq_ppoll`.
+- [ ] Implement `zmq_poller_*` APIs.
+- [ ] Implement `ZMQ_FD`.
+- [ ] Implement `ZMQ_EVENTS`.
+- [ ] Implement monitor event generation.
+- [ ] Implement `zmq_socket_monitor`.
+- [ ] Implement `zmq_socket_monitor_versioned`.
+- [ ] Implement `zmq_proxy`.
+- [ ] Implement `zmq_proxy_steerable`.
+- [ ] Implement timers API.
+- [ ] Implement atomic counter API.
+- [ ] Implement stopwatch helpers.
+- [ ] Implement thread helpers.
+
+Completion checks:
+
+- [ ] `cargo fmt --all`
+- [ ] `cargo test --workspace`
+- [ ] Poller tests pass.
+- [ ] Monitor tests pass.
+- [ ] Proxy tests pass.
+- [ ] Timers and utility tests pass.
+
+## Phase 8: Platform and Sys Layer [ ]
+
+Goal: support Linux, macOS, and Windows from the start.
+
+- [ ] Implement Unix fd RAII.
+- [ ] Implement Windows socket RAII.
+- [ ] Implement Unix nonblocking setup.
+- [ ] Implement Windows nonblocking setup.
+- [ ] Implement Unix socketpair or pipe signaler.
+- [ ] Implement Windows signaler equivalent.
+- [ ] Implement epoll backend where available.
+- [ ] Implement kqueue backend where available.
+- [ ] Implement poll backend.
+- [ ] Implement select backend.
+- [ ] Implement Windows poll/select backend.
+- [ ] Implement sockaddr wrappers.
+- [ ] Implement TCP socket syscalls.
+- [ ] Implement IPC socket syscalls.
+- [ ] Implement Windows DLL export validation.
+
+Completion checks:
+
+- [ ] `cargo fmt --all`
+- [ ] `cargo test --workspace`
+- [ ] Linux build passes.
+- [ ] macOS build passes.
+- [ ] Windows build passes.
+- [ ] Business logic contains no direct syscall FFI.
+
+## Phase 9: TCP, IPC, ZMTP [ ]
+
+Goal: implement cross-process and cross-implementation messaging.
+
+- [ ] Implement TCP address parser.
+- [ ] Implement TCP listener.
+- [ ] Implement TCP connecter.
+- [ ] Implement TCP reconnect and backoff.
+- [ ] Implement IPC address parser.
+- [ ] Implement IPC listener.
+- [ ] Implement IPC connecter.
+- [ ] Implement stream engine base.
+- [ ] Implement ZMTP greeting.
+- [ ] Implement ZMTP v1 encoder and decoder.
+- [ ] Implement ZMTP v2 encoder and decoder.
+- [ ] Implement ZMTP v3 encoder and decoder.
+- [ ] Implement ZMTP v3.1 metadata.
+- [ ] Implement raw engine.
+- [ ] Add wire-level tests using ordinary TCP sockets.
+
+Completion checks:
+
+- [ ] `cargo fmt --all`
+- [ ] `cargo test --workspace`
+- [ ] PAIR tcp tests pass.
+- [ ] REQ/REP tcp tests pass.
+- [ ] PUSH/PULL tcp tests pass.
+- [ ] IPC tests pass on supported platforms.
+- [ ] C++ client to Rust server interop passes.
+- [ ] Rust client to C++ server interop passes.
+- [ ] Wire-level ZMTP tests pass.
+
+## Phase 10: Security [ ]
+
+Goal: support original security mechanisms.
+
+- [ ] Implement NULL mechanism.
+- [ ] Implement ZAP client flow.
+- [ ] Implement ZAP request encoding.
+- [ ] Implement ZAP reply parsing.
+- [ ] Implement PLAIN client.
+- [ ] Implement PLAIN server.
+- [ ] Implement CURVE client.
+- [ ] Implement CURVE server.
+- [ ] Implement CURVE keypair utility.
+- [ ] Implement CURVE public key derivation.
+- [ ] Implement Z85 encode.
+- [ ] Implement Z85 decode.
+- [ ] Implement GSSAPI client.
+- [ ] Implement GSSAPI server.
+- [ ] Ensure secrets use zeroization.
+- [ ] Add security interop tests.
+
+Completion checks:
+
+- [ ] `cargo fmt --all`
+- [ ] `cargo test --workspace`
+- [ ] `cargo test --workspace --features curve,gssapi`
+- [ ] NULL security tests pass.
+- [ ] PLAIN security tests pass.
+- [ ] ZAP tests pass.
+- [ ] CURVE tests pass.
+- [ ] GSSAPI tests pass where platform support exists.
+- [ ] C++ and Rust secure interop passes.
+
+## Phase 11: Draft Sockets and Extended Transports [ ]
+
+Goal: satisfy full confirmed feature scope.
+
+- [ ] Implement SERVER.
+- [ ] Implement CLIENT.
+- [ ] Implement RADIO.
+- [ ] Implement DISH.
+- [ ] Implement GATHER.
+- [ ] Implement SCATTER.
+- [ ] Implement DGRAM.
+- [ ] Implement PEER.
+- [ ] Implement CHANNEL.
+- [ ] Implement UDP unicast and multicast.
+- [ ] Implement WS transport.
+- [ ] Implement WSS transport.
+- [ ] Implement OpenPGM FFI.
+- [ ] Implement PGM and EPGM transport.
+- [ ] Implement NORM FFI and transport.
+- [ ] Implement TIPC transport.
+- [ ] Implement VMCI transport.
+- [ ] Implement VSOCK transport.
+
+Completion checks:
+
+- [ ] `cargo fmt --all`
+- [ ] `cargo test --workspace --all-features`
+- [ ] Draft socket tests pass.
+- [ ] UDP tests pass.
+- [ ] WS tests pass.
+- [ ] WSS tests pass.
+- [ ] PGM tests pass where dependency exists.
+- [ ] NORM tests pass where dependency exists.
+- [ ] TIPC tests pass where platform support exists.
+- [ ] VMCI tests pass where platform support exists.
+- [ ] VSOCK tests pass where platform support exists.
+
+## Phase 12: Performance Gate [ ]
+
+Goal: prove performance regression is below 5%.
+
+- [ ] Implement inproc latency benchmark.
+- [ ] Implement inproc throughput benchmark.
+- [ ] Implement tcp latency benchmark.
+- [ ] Implement tcp throughput benchmark.
+- [ ] Implement ipc latency benchmark.
+- [ ] Implement ipc throughput benchmark.
+- [ ] Implement proxy throughput benchmark.
+- [ ] Implement subscription lookup benchmark.
+- [ ] Implement CURVE throughput benchmark.
+- [ ] Implement WS throughput benchmark.
+- [ ] Implement WSS throughput benchmark.
+- [ ] Add benchmark runner for C++ original.
+- [ ] Add benchmark runner for Rust implementation.
+- [ ] Add median comparison gate.
+- [ ] Add report generation.
+
+Completion checks:
+
+- [ ] Latency passes with `rust_median <= cpp_median * 1.05`.
+- [ ] Throughput passes with `rust_median >= cpp_median * 0.95`.
+- [ ] P0 performance cases all pass.
+- [ ] Full performance report is generated.
+
+## Phase 13: Unsafe Gate [ ]
+
+Goal: prove unsafe stays below the required threshold.
+
+- [ ] Add unsafe counting command.
+- [ ] Add unsafe report.
+- [ ] Separate handwritten unsafe from generated bindings.
+- [ ] Verify default feature unsafe below 8%.
+- [ ] Verify full feature handwritten unsafe below 10%.
+- [ ] Audit every unsafe block for safety comments.
+- [ ] Move accidental unsafe from business logic into approved unsafe islands.
+
+Completion checks:
+
+- [ ] Unsafe report generated.
+- [ ] Default feature unsafe target passes.
+- [ ] Full feature unsafe target passes.
+- [ ] No unsafe exists in unapproved modules.
+
+## Phase 14: Release Hardening [ ]
+
+Goal: prepare the first full-compatible release.
+
+- [ ] Full API checklist complete.
+- [ ] Full feature checklist complete.
+- [ ] Full test checklist complete.
+- [ ] Linux CI passes.
+- [ ] macOS CI passes.
+- [ ] Windows CI passes.
+- [ ] `cargo test --workspace` passes.
+- [ ] `cargo test --workspace --all-features` passes.
+- [ ] Differential suite passes.
+- [ ] Interop suite passes.
+- [ ] Fuzz smoke tests pass.
+- [ ] Performance gate passes.
+- [ ] Unsafe gate passes.
+- [ ] C ABI symbols validated.
+- [ ] Rust native API docs complete.
+- [ ] C ABI compatibility notes complete.
+- [ ] Migration guide complete.
+
+## Next Agent Task Queue
+
+- [x] Expand `include/zmq.h` to the full original public API surface.
+- [x] Add `tests/abi` and basic C ABI tests.
+- [x] Add complete ABI symbol checklist.
+- [ ] Replace temporary message ABI storage with final-compatible design.
+- [ ] Implement full `zmq_msg_*` API.
+- [ ] Add original C++ vs Rust differential runner.
+- [ ] Add unsafe counting tool.
+- [ ] Start `ypipe`, `pipe`, and mailbox migration.

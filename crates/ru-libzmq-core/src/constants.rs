@@ -55,3 +55,6 @@ pub const ZMQ_CHANNEL: i32 = 20;
 pub const ZMQ_DONTWAIT: i32 = 1;
 pub const ZMQ_SNDMORE: i32 = 2;
 pub const ZMQ_MORE: i32 = 1;
+pub const ZMQ_SRCFD: i32 = 2;
+pub const ZMQ_SHARED: i32 = 3;
+pub const ZMQ_GROUP_MAX_LENGTH: i32 = 255;
