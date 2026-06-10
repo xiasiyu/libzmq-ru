@@ -47,5 +47,10 @@ path = "src/bin/performance_gate.rs"
 libzmq-core.workspace = true
 zmq = { package = "libzmq-ffi", path = "../libzmq-ffi" }
 
+[features]
+default = []
+sodium = ["zmq/sodium"]
+wss = ["zmq/wss"]
+
 [lints]
 workspace = true

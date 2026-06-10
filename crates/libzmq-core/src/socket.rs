@@ -1,15 +1,17 @@
 use crate::constants::*;
 use crate::context::{
-    ContextShared, InprocEndpoint, MessageQueue, SubscriptionSet, WelcomeMessage,
+    ContextShared, InprocEndpoint, MessageQueue, SubscriptionSet, SubscriptionState, WelcomeMessage,
 };
 use crate::transport::{
     IpcEndpoint, TcpEndpoint, UdpEndpoint, WsEndpoint, ZmtpFrame, ZmtpGreeting, ZmtpMetadata,
 };
 use crate::{z85_decode, Error, Message, Result, ZapReply, ZapRequest};
 use base64::Engine;
+#[allow(deprecated)]
+use crypto_box::aead::AeadInPlace;
 use crypto_box::{
     aead::{Aead, KeyInit},
-    PublicKey as CurvePublicKey, SalsaBox, SecretKey as CurveSecretKey,
+    PublicKey as CurvePublicKey, SalsaBox, SecretKey as CurveSecretKey, Tag as CurveTag,
 };
 use crypto_secretbox::XSalsa20Poly1305;
 use libzmq_sys::ipc::{IpcListenerHandle, IpcStreamHandle};
@@ -31,6 +33,9 @@ use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
+
+const ZMTP_FLAG_LONG_LOCAL: u8 = 0x02;
+const ZMTP_FLAG_COMMAND_LOCAL: u8 = 0x04;
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,20 +220,64 @@ impl Write for WssStream {
     }
 }
 
-#[derive(Debug)]
 struct CurveSession {
     local_transient_secret: [u8; 32],
     peer_transient_public: [u8; 32],
+    send_box: SalsaBox,
+    recv_box: SalsaBox,
+    #[cfg(feature = "sodium")]
+    sodium_key: Option<[u8; 32]>,
     send_nonce: u64,
     recv_nonce: u64,
     send_prefix: &'static [u8; 16],
     recv_prefix: &'static [u8; 16],
 }
 
+impl std::fmt::Debug for CurveSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CurveSession")
+            .field("send_nonce", &self.send_nonce)
+            .field("recv_nonce", &self.recv_nonce)
+            .field("send_prefix", &self.send_prefix)
+            .field("recv_prefix", &self.recv_prefix)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Drop for CurveSession {
     fn drop(&mut self) {
         self.local_transient_secret.zeroize();
         self.peer_transient_public.zeroize();
+    }
+}
+
+fn curve_session(
+    local_transient_secret: [u8; 32],
+    peer_transient_public: [u8; 32],
+    send_nonce: u64,
+    recv_nonce: u64,
+    send_prefix: &'static [u8; 16],
+    recv_prefix: &'static [u8; 16],
+) -> CurveSession {
+    let send_box = curve_box_for(&peer_transient_public, &local_transient_secret);
+    let recv_box = curve_box_for(&peer_transient_public, &local_transient_secret);
+    #[cfg(feature = "sodium")]
+    let sodium_key = libzmq_sys::sodium::crypto_box_beforenm_key(
+        &peer_transient_public,
+        &local_transient_secret,
+    );
+    CurveSession {
+        local_transient_secret,
+        peer_transient_public,
+        send_box,
+        recv_box,
+        #[cfg(feature = "sodium")]
+        sodium_key,
+        send_nonce,
+        recv_nonce,
+        send_prefix,
+        recv_prefix,
     }
 }
 
@@ -424,7 +473,7 @@ impl Socket {
             options: Mutex::new(SocketOptions::default()),
             context,
             inbox: Arc::new(Mutex::new(VecDeque::new())),
-            subscriptions: Arc::new(Mutex::new(Vec::new())),
+            subscriptions: Arc::new(Mutex::new(SubscriptionState::default())),
             xpub_welcome: Arc::new(Mutex::new(None)),
             inproc: Mutex::new(InprocState::default()),
             tcp: Mutex::new(TcpState::default()),
@@ -606,7 +655,7 @@ impl Socket {
             0,
             monitor_inbox,
             SocketType::Pair,
-            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(SubscriptionState::default())),
             Arc::new(Mutex::new(None)),
         )?;
         *self.monitor.lock().map_err(|_| Error::InvalidSocket)? = Some(MonitorState {
@@ -751,6 +800,16 @@ impl Socket {
     }
 
     fn try_send_inproc_fast(&self, message: Message) -> Result<Option<Message>> {
+        if self.socket_type == SocketType::Pub {
+            let bound_endpoint = {
+                let inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
+                inproc.bound_endpoint.clone()
+            };
+            if let Some(bound_endpoint) = bound_endpoint {
+                bound_endpoint.send_owned_to_matching_peers(message)?;
+                return Ok(None);
+            }
+        }
         if !matches!(
             self.socket_type,
             SocketType::Pair | SocketType::Push | SocketType::Channel
@@ -820,12 +879,7 @@ impl Socket {
             .subscriptions
             .lock()
             .map_err(|_| Error::InvalidSocket)?;
-        if !subscriptions
-            .iter()
-            .any(|stored| stored.as_slice() == prefix)
-        {
-            subscriptions.push(prefix.to_vec());
-        }
+        subscriptions.insert(prefix);
         drop(subscriptions);
         let inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
         if let Some(endpoint) = &inproc.connected_endpoint {
@@ -844,7 +898,7 @@ impl Socket {
             .subscriptions
             .lock()
             .map_err(|_| Error::InvalidSocket)?;
-        subscriptions.retain(|stored| stored.as_slice() != prefix);
+        subscriptions.remove(prefix);
         Ok(())
     }
 
@@ -862,12 +916,7 @@ impl Socket {
             .subscriptions
             .lock()
             .map_err(|_| Error::InvalidSocket)?;
-        if !subscriptions
-            .iter()
-            .any(|stored| stored.as_slice() == group.as_bytes())
-        {
-            subscriptions.push(group.as_bytes().to_vec());
-        }
+        subscriptions.insert(group.as_bytes());
         Ok(())
     }
 
@@ -885,7 +934,7 @@ impl Socket {
             .subscriptions
             .lock()
             .map_err(|_| Error::InvalidSocket)?;
-        subscriptions.retain(|stored| stored.as_slice() != group.as_bytes());
+        subscriptions.remove(group.as_bytes());
         Ok(())
     }
 
@@ -1285,11 +1334,9 @@ impl Socket {
             tcp.handshake_started = true;
         }
         if let Some(session) = tcp.curve_session.as_mut() {
-            let body = curve_message_body(session, message.data(), message.more())?;
+            let frame = curve_message_frame(session, message.data(), message.more())?;
             let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
-            return stream
-                .write_all(&ZmtpFrame::message(body).encode_v3())
-                .map_err(map_io_error);
+            return stream.write_all(&frame).map_err(map_io_error);
         }
         let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
         stream
@@ -1340,11 +1387,14 @@ impl Socket {
             tcp.peer_ready = true;
         }
         loop {
+            if tcp.curve_session.is_some() {
+                let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
+                let body = read_zmtp_frame_body_tcp(stream)?;
+                let session = tcp.curve_session.as_mut().ok_or(Error::InvalidSocket)?;
+                return curve_message_from_body(session, &body);
+            }
             let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
             let frame = read_zmtp_frame_tcp(stream)?;
-            if let Some(session) = tcp.curve_session.as_mut() {
-                return curve_message_from_body(session, frame.body());
-            }
             if !frame.command_frame() {
                 let mut message = Message::from_vec(frame.body().to_vec());
                 message.set_more(frame.more());
@@ -1494,11 +1544,9 @@ impl Socket {
             ipc.handshake_started = true;
         }
         if let Some(session) = ipc.curve_session.as_mut() {
-            let body = curve_message_body(session, message.data(), message.more())?;
+            let frame = curve_message_frame(session, message.data(), message.more())?;
             let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
-            return stream
-                .write_all(&ZmtpFrame::message(body).encode_v3())
-                .map_err(map_io_error);
+            return stream.write_all(&frame).map_err(map_io_error);
         }
         let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
         stream
@@ -1549,11 +1597,14 @@ impl Socket {
             ipc.peer_ready = true;
         }
         loop {
+            if ipc.curve_session.is_some() {
+                let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
+                let body = read_zmtp_frame_body_ipc(stream)?;
+                let session = ipc.curve_session.as_mut().ok_or(Error::InvalidSocket)?;
+                return curve_message_from_body(session, &body);
+            }
             let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
             let frame = read_zmtp_frame_ipc(stream)?;
-            if let Some(session) = ipc.curve_session.as_mut() {
-                return curve_message_from_body(session, frame.body());
-            }
             if !frame.command_frame() {
                 let mut message = Message::from_vec(frame.body().to_vec());
                 message.set_more(frame.more());
@@ -2522,6 +2573,10 @@ fn read_zmtp_frame_bytes_tcp(stream: &mut TcpStreamHandle) -> Result<Vec<u8>> {
     Ok(encoded)
 }
 
+fn read_zmtp_frame_body_tcp(stream: &mut TcpStreamHandle) -> Result<Vec<u8>> {
+    read_zmtp_frame_body(stream)
+}
+
 fn write_zmtp_handshake_ipc(
     stream: &mut IpcStreamHandle,
     socket_type: SocketType,
@@ -2645,6 +2700,42 @@ fn read_zmtp_frame_bytes_ipc(stream: &mut IpcStreamHandle) -> Result<Vec<u8>> {
     Ok(encoded)
 }
 
+fn read_zmtp_frame_body_ipc(stream: &mut IpcStreamHandle) -> Result<Vec<u8>> {
+    let mut flags = [0u8; 1];
+    stream.read_exact(&mut flags).map_err(map_io_error)?;
+    let long = flags[0] & ZMTP_FLAG_LONG_LOCAL != 0;
+    let body_len = if long {
+        let mut len = [0u8; 8];
+        stream.read_exact(&mut len).map_err(map_io_error)?;
+        u64::from_be_bytes(len) as usize
+    } else {
+        let mut len = [0u8; 1];
+        stream.read_exact(&mut len).map_err(map_io_error)?;
+        len[0] as usize
+    };
+    let mut body = vec![0; body_len];
+    stream.read_exact(&mut body).map_err(map_io_error)?;
+    Ok(body)
+}
+
+fn read_zmtp_frame_body(stream: &mut impl Read) -> Result<Vec<u8>> {
+    let mut flags = [0u8; 1];
+    stream.read_exact(&mut flags).map_err(map_io_error)?;
+    let long = flags[0] & ZMTP_FLAG_LONG_LOCAL != 0;
+    let body_len = if long {
+        let mut len = [0u8; 8];
+        stream.read_exact(&mut len).map_err(map_io_error)?;
+        u64::from_be_bytes(len) as usize
+    } else {
+        let mut len = [0u8; 1];
+        stream.read_exact(&mut len).map_err(map_io_error)?;
+        len[0] as usize
+    };
+    let mut body = vec![0; body_len];
+    stream.read_exact(&mut body).map_err(map_io_error)?;
+    Ok(body)
+}
+
 fn write_plain_handshake_tcp(
     stream: &mut TcpStreamHandle,
     socket_type: SocketType,
@@ -2723,7 +2814,7 @@ fn authorize_plain_via_zap(
 ) -> Result<()> {
     let peer_id = context.next_transient_socket_id();
     let inbox = Arc::new(Mutex::new(VecDeque::new()));
-    let subscriptions = Arc::new(Mutex::new(Vec::new()));
+    let subscriptions = Arc::new(Mutex::new(SubscriptionState::default()));
     let endpoint = context
         .connect_inproc(
             "zeromq.zap.01",
@@ -2877,7 +2968,7 @@ fn authorize_curve_via_zap(
 ) -> Result<()> {
     let peer_id = context.next_transient_socket_id();
     let inbox = Arc::new(Mutex::new(VecDeque::new()));
-    let subscriptions = Arc::new(Mutex::new(Vec::new()));
+    let subscriptions = Arc::new(Mutex::new(SubscriptionState::default()));
     let endpoint = context
         .connect_inproc(
             "zeromq.zap.01",
@@ -3064,14 +3155,14 @@ impl CurveClientHandshake {
     }
 
     fn session(self) -> Result<CurveSession> {
-        Ok(CurveSession {
-            local_transient_secret: self.transient_secret,
-            peer_transient_public: self.server_transient_public.ok_or(Error::InvalidArgument)?,
-            send_nonce: self.send_nonce,
-            recv_nonce: self.recv_nonce,
-            send_prefix: b"CurveZMQMESSAGEC",
-            recv_prefix: b"CurveZMQMESSAGES",
-        })
+        Ok(curve_session(
+            self.transient_secret,
+            self.server_transient_public.ok_or(Error::InvalidArgument)?,
+            self.send_nonce,
+            self.recv_nonce,
+            b"CurveZMQMESSAGEC",
+            b"CurveZMQMESSAGES",
+        ))
     }
 
     fn next_send_nonce(&mut self) -> u64 {
@@ -3091,14 +3182,14 @@ impl Drop for CurveClientHandshake {
 
 impl CurveServerHandshake {
     fn session(self) -> CurveSession {
-        CurveSession {
-            local_transient_secret: self.transient_secret,
-            peer_transient_public: self.client_transient_public,
-            send_nonce: 1,
-            recv_nonce: self.peer_nonce,
-            send_prefix: b"CurveZMQMESSAGES",
-            recv_prefix: b"CurveZMQMESSAGEC",
-        }
+        curve_session(
+            self.transient_secret,
+            self.client_transient_public,
+            1,
+            self.peer_nonce,
+            b"CurveZMQMESSAGES",
+            b"CurveZMQMESSAGEC",
+        )
     }
 }
 
@@ -3253,26 +3344,68 @@ fn curve_ready_body(socket_type: SocketType, session: &mut CurveSession) -> Resu
     Ok(command_body("READY", tail))
 }
 
-fn curve_message_body(session: &mut CurveSession, data: &[u8], more: bool) -> Result<Vec<u8>> {
+fn curve_message_frame(session: &mut CurveSession, data: &[u8], more: bool) -> Result<Vec<u8>> {
     let nonce_number = session.next_send_nonce();
     let nonce = curve_nonce(session.send_prefix, nonce_number);
-    let mut plaintext = Vec::with_capacity(1 + data.len());
-    plaintext.push(u8::from(more));
-    plaintext.extend_from_slice(data);
-    let ciphertext = curve_box_encrypt(
-        &plaintext,
-        &nonce,
-        &session.peer_transient_public,
-        &session.local_transient_secret,
-    )?;
-    let mut tail = Vec::with_capacity(8 + ciphertext.len());
-    tail.extend_from_slice(&nonce_number.to_be_bytes());
-    tail.extend_from_slice(&ciphertext);
-    Ok(command_body("MESSAGE", tail))
+    let mut payload = Vec::with_capacity(1 + data.len());
+    payload.push(u8::from(more));
+    payload.extend_from_slice(data);
+
+    #[cfg(feature = "sodium")]
+    if let Some(key) = &session.sodium_key {
+        return curve_message_frame_sodium(&payload, &nonce, nonce_number, key);
+    }
+
+    let ciphertext = curve_message_encrypt(session, payload, &nonce)?;
+    let body_len = 1 + "MESSAGE".len() + 8 + ciphertext.len();
+    let mut frame = Vec::with_capacity(9 + body_len);
+    if body_len <= u8::MAX as usize {
+        frame.push(ZMTP_FLAG_COMMAND_LOCAL);
+        frame.push(body_len as u8);
+    } else {
+        frame.push(ZMTP_FLAG_COMMAND_LOCAL | ZMTP_FLAG_LONG_LOCAL);
+        frame.extend_from_slice(&(body_len as u64).to_be_bytes());
+    }
+    frame.push("MESSAGE".len() as u8);
+    frame.extend_from_slice(b"MESSAGE");
+    frame.extend_from_slice(&nonce_number.to_be_bytes());
+    frame.extend_from_slice(&ciphertext);
+    Ok(frame)
+}
+
+#[cfg(feature = "sodium")]
+fn curve_message_frame_sodium(
+    payload: &[u8],
+    nonce: &[u8; 24],
+    nonce_number: u64,
+    key: &[u8; 32],
+) -> Result<Vec<u8>> {
+    let body_len = 1 + "MESSAGE".len() + 8 + 16 + payload.len();
+    let mut frame = Vec::with_capacity(9 + body_len);
+    if body_len <= u8::MAX as usize {
+        frame.push(ZMTP_FLAG_COMMAND_LOCAL);
+        frame.push(body_len as u8);
+    } else {
+        frame.push(ZMTP_FLAG_COMMAND_LOCAL | ZMTP_FLAG_LONG_LOCAL);
+        frame.extend_from_slice(&(body_len as u64).to_be_bytes());
+    }
+    frame.push("MESSAGE".len() as u8);
+    frame.extend_from_slice(b"MESSAGE");
+    frame.extend_from_slice(&nonce_number.to_be_bytes());
+    let ciphertext_start = frame.len();
+    frame.resize(ciphertext_start + 16 + payload.len(), 0);
+    libzmq_sys::sodium::crypto_box_easy_afternm_encrypt_into(
+        &mut frame[ciphertext_start..],
+        payload,
+        nonce,
+        key,
+    )
+    .ok_or(Error::InvalidArgument)?;
+    Ok(frame)
 }
 
 fn curve_message_from_body(session: &mut CurveSession, body: &[u8]) -> Result<Message> {
-    let tail = command_tail_from_body(body, "MESSAGE")?;
+    let tail = curve_message_tail(body)?;
     if tail.len() < 25 {
         return Err(Error::InvalidArgument);
     }
@@ -3282,18 +3415,20 @@ fn curve_message_from_body(session: &mut CurveSession, body: &[u8]) -> Result<Me
     }
     session.recv_nonce = nonce_number;
     let nonce = curve_nonce(session.recv_prefix, nonce_number);
-    let plaintext = curve_box_decrypt(
-        &tail[8..],
-        &nonce,
-        &session.peer_transient_public,
-        &session.local_transient_secret,
-    )?;
+    let plaintext = curve_message_decrypt(session, &tail[8..], &nonce)?;
     if plaintext.is_empty() || plaintext[0] & !0x01 != 0 {
         return Err(Error::InvalidArgument);
     }
     let mut message = Message::from_vec(plaintext[1..].to_vec());
     message.set_more(plaintext[0] & 0x01 != 0);
     Ok(message)
+}
+
+fn curve_message_tail(body: &[u8]) -> Result<&[u8]> {
+    if body.len() < 8 || body[0] != 7 || &body[1..8] != b"MESSAGE" {
+        return Err(Error::InvalidArgument);
+    }
+    Ok(&body[8..])
 }
 
 impl CurveSession {
@@ -3320,6 +3455,13 @@ fn curve_option_key(value: &[u8]) -> Result<[u8; 32]> {
 
 fn curve_public_from_secret(secret: &[u8; 32]) -> [u8; 32] {
     CurveSecretKey::from(*secret).public_key().to_bytes()
+}
+
+fn curve_box_for(peer_public: &[u8; 32], local_secret: &[u8; 32]) -> SalsaBox {
+    SalsaBox::new(
+        &CurvePublicKey::from(*peer_public),
+        &CurveSecretKey::from(*local_secret),
+    )
 }
 
 fn curve_box_encrypt(
@@ -3354,6 +3496,70 @@ fn curve_box_decrypt(
     cipher
         .decrypt(&nonce, ciphertext)
         .map_err(|_| Error::InvalidArgument)
+}
+
+fn curve_message_encrypt(
+    session: &CurveSession,
+    mut plaintext: Vec<u8>,
+    nonce: &[u8; 24],
+) -> Result<Vec<u8>> {
+    #[cfg(feature = "sodium")]
+    if let Some(key) = &session.sodium_key {
+        return libzmq_sys::sodium::crypto_box_easy_afternm_encrypt(&plaintext, nonce, key)
+            .ok_or(Error::InvalidArgument);
+    }
+
+    let tag = curve_box_encrypt_in_place(&session.send_box, &mut plaintext, nonce)?;
+    let mut ciphertext = Vec::with_capacity(tag.len() + plaintext.len());
+    ciphertext.extend_from_slice(tag.as_slice());
+    ciphertext.extend_from_slice(&plaintext);
+    Ok(ciphertext)
+}
+
+fn curve_message_decrypt(
+    session: &CurveSession,
+    ciphertext: &[u8],
+    nonce: &[u8; 24],
+) -> Result<Vec<u8>> {
+    #[cfg(feature = "sodium")]
+    if let Some(key) = &session.sodium_key {
+        return libzmq_sys::sodium::crypto_box_easy_afternm_decrypt(ciphertext, nonce, key)
+            .ok_or(Error::InvalidArgument);
+    }
+
+    curve_box_decrypt_in_place(&session.recv_box, ciphertext, nonce)
+}
+
+#[allow(deprecated)]
+fn curve_box_encrypt_in_place(
+    cipher: &SalsaBox,
+    plaintext: &mut [u8],
+    nonce: &[u8; 24],
+) -> Result<CurveTag> {
+    let nonce =
+        crypto_box::Nonce::try_from(nonce.as_slice()).map_err(|_| Error::InvalidArgument)?;
+    cipher
+        .encrypt_in_place_detached(&nonce, &[], plaintext)
+        .map_err(|_| Error::InvalidArgument)
+}
+
+#[allow(deprecated)]
+fn curve_box_decrypt_in_place(
+    cipher: &SalsaBox,
+    ciphertext: &[u8],
+    nonce: &[u8; 24],
+) -> Result<Vec<u8>> {
+    if ciphertext.len() < 16 {
+        return Err(Error::InvalidArgument);
+    }
+    let nonce =
+        crypto_box::Nonce::try_from(nonce.as_slice()).map_err(|_| Error::InvalidArgument)?;
+    let tag = CurveTag::from_slice(&ciphertext[..16]);
+    let mut plaintext = ciphertext[16..].to_vec();
+    cipher
+        .decrypt_in_place_detached(&nonce, &[], &mut plaintext, tag)
+        .map_err(|_| Error::InvalidArgument)?;
+    Ok(plaintext)
 }
 
 fn curve_secretbox_encrypt(plaintext: &[u8], nonce: &[u8; 24], key: &[u8; 32]) -> Result<Vec<u8>> {
@@ -3411,17 +3617,6 @@ fn socket_type_metadata(socket_type: SocketType) -> Vec<u8> {
 
 fn ready_command_body_from_metadata(metadata: Vec<u8>) -> Vec<u8> {
     command_body("READY", metadata)
-}
-
-fn command_tail_from_body<'a>(body: &'a [u8], expected: &str) -> Result<&'a [u8]> {
-    if body.is_empty() {
-        return Err(Error::InvalidArgument);
-    }
-    let name_len = body[0] as usize;
-    if body.len() < 1 + name_len || &body[1..1 + name_len] != expected.as_bytes() {
-        return Err(Error::InvalidArgument);
-    }
-    Ok(&body[1 + name_len..])
 }
 
 fn write_gssapi_handshake_tcp(
@@ -3496,7 +3691,7 @@ fn authorize_gssapi_via_zap(
 ) -> Result<()> {
     let peer_id = context.next_transient_socket_id();
     let inbox = Arc::new(Mutex::new(VecDeque::new()));
-    let subscriptions = Arc::new(Mutex::new(Vec::new()));
+    let subscriptions = Arc::new(Mutex::new(SubscriptionState::default()));
     let endpoint = context
         .connect_inproc(
             "zeromq.zap.01",

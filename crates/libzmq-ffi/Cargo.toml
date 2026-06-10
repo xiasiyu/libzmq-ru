@@ -47,6 +47,7 @@ udp = []
 vmci = []
 vsock = []
 ws = []
+sodium = ["libzmq-core/sodium"]
 wss = ["ws", "libzmq-core/wss"]
 zap = []
 

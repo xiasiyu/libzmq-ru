@@ -13,6 +13,10 @@ full = ["gssapi", "norm", "openpgm"]
 gssapi = []
 norm = []
 openpgm = []
+sodium = []
+
+[build-dependencies]
+pkg-config = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

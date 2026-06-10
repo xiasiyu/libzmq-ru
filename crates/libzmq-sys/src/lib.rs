@@ -20,6 +20,133 @@ pub mod platform {
     }
 }
 
+#[cfg(feature = "sodium")]
+pub mod sodium {
+    use std::ffi::{c_int, c_uchar, c_ulonglong};
+    use std::sync::OnceLock;
+
+    const KEY_SIZE: usize = 32;
+    const NONCE_SIZE: usize = 24;
+    const MAC_SIZE: usize = 16;
+
+    #[link(name = "sodium")]
+    unsafe extern "C" {
+        fn sodium_init() -> c_int;
+        fn crypto_box_beforenm(
+            key: *mut c_uchar,
+            public_key: *const c_uchar,
+            secret_key: *const c_uchar,
+        ) -> c_int;
+        fn crypto_box_easy_afternm(
+            ciphertext: *mut c_uchar,
+            message: *const c_uchar,
+            message_len: c_ulonglong,
+            nonce: *const c_uchar,
+            key: *const c_uchar,
+        ) -> c_int;
+        fn crypto_box_open_easy_afternm(
+            message: *mut c_uchar,
+            ciphertext: *const c_uchar,
+            ciphertext_len: c_ulonglong,
+            nonce: *const c_uchar,
+            key: *const c_uchar,
+        ) -> c_int;
+    }
+
+    pub fn crypto_box_beforenm_key(
+        public_key: &[u8; KEY_SIZE],
+        secret_key: &[u8; KEY_SIZE],
+    ) -> Option<[u8; KEY_SIZE]> {
+        ensure_initialized()?;
+        let mut key = [0; KEY_SIZE];
+        // SAFETY: All pointers reference fixed-size initialized byte arrays with libsodium's
+        // documented key lengths, and `key` is writable for `KEY_SIZE` bytes.
+        let rc = unsafe {
+            crypto_box_beforenm(key.as_mut_ptr(), public_key.as_ptr(), secret_key.as_ptr())
+        };
+        (rc == 0).then_some(key)
+    }
+
+    pub fn crypto_box_easy_afternm_encrypt(
+        message: &[u8],
+        nonce: &[u8; NONCE_SIZE],
+        key: &[u8; KEY_SIZE],
+    ) -> Option<Vec<u8>> {
+        ensure_initialized()?;
+        let mut ciphertext = vec![0; message.len() + MAC_SIZE];
+        // SAFETY: `ciphertext` is writable for `message.len() + MAC_SIZE` bytes; message,
+        // nonce, and key pointers are valid for libsodium's documented input sizes.
+        let rc = unsafe {
+            crypto_box_easy_afternm(
+                ciphertext.as_mut_ptr(),
+                message.as_ptr(),
+                message.len() as c_ulonglong,
+                nonce.as_ptr(),
+                key.as_ptr(),
+            )
+        };
+        (rc == 0).then_some(ciphertext)
+    }
+
+    pub fn crypto_box_easy_afternm_encrypt_into(
+        ciphertext: &mut [u8],
+        message: &[u8],
+        nonce: &[u8; NONCE_SIZE],
+        key: &[u8; KEY_SIZE],
+    ) -> Option<()> {
+        if ciphertext.len() != message.len() + MAC_SIZE {
+            return None;
+        }
+        ensure_initialized()?;
+        // SAFETY: `ciphertext` is writable for exactly `message.len() + MAC_SIZE` bytes;
+        // message, nonce, and key pointers are valid for libsodium's documented input sizes.
+        let rc = unsafe {
+            crypto_box_easy_afternm(
+                ciphertext.as_mut_ptr(),
+                message.as_ptr(),
+                message.len() as c_ulonglong,
+                nonce.as_ptr(),
+                key.as_ptr(),
+            )
+        };
+        (rc == 0).then_some(())
+    }
+
+    pub fn crypto_box_easy_afternm_decrypt(
+        ciphertext: &[u8],
+        nonce: &[u8; NONCE_SIZE],
+        key: &[u8; KEY_SIZE],
+    ) -> Option<Vec<u8>> {
+        if ciphertext.len() < MAC_SIZE {
+            return None;
+        }
+        ensure_initialized()?;
+        let mut message = vec![0; ciphertext.len() - MAC_SIZE];
+        // SAFETY: `message` is writable for `ciphertext.len() - MAC_SIZE` bytes; ciphertext,
+        // nonce, and key pointers are valid for libsodium's documented input sizes.
+        let rc = unsafe {
+            crypto_box_open_easy_afternm(
+                message.as_mut_ptr(),
+                ciphertext.as_ptr(),
+                ciphertext.len() as c_ulonglong,
+                nonce.as_ptr(),
+                key.as_ptr(),
+            )
+        };
+        (rc == 0).then_some(message)
+    }
+
+    fn ensure_initialized() -> Option<()> {
+        static INIT: OnceLock<bool> = OnceLock::new();
+        (*INIT.get_or_init(|| {
+            // SAFETY: `sodium_init` is process-global initialization designed to be called
+            // multiple times; libsodium handles concurrent/repeated calls internally.
+            unsafe { sodium_init() >= 0 }
+        }))
+        .then_some(())
+    }
+}
+
 use std::io;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};

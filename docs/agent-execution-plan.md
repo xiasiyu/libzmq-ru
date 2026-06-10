@@ -419,7 +419,7 @@ Completion checks:
 
 Status note: Phase 11 is in progress. Draft `SERVER`/`CLIENT` now work as one-to-one messaging over TCP and as routing-id-addressed messaging over inproc. Draft `PEER` now works as one-to-one messaging over TCP, routing-id-addressed messaging over inproc, and exposes `connect_peer` in the Rust API plus `zmq_connect_peer` in the C ABI. Draft `CHANNEL` now works as bidirectional one-to-one messaging over inproc/TCP/IPC using the existing ZMTP frame path. Draft `SCATTER`/`GATHER` now work as load-balanced unidirectional messaging over inproc/TCP/IPC, including wrong-direction error behavior. Draft `RADIO`/`DISH` now work over inproc with exact message-group filtering, `join`/`leave` in the Rust API, `zmq_join`/`zmq_leave` in the C ABI, and C ABI preservation of message groups through `zmq_msg_send`/`zmq_msg_recv`. Draft `DGRAM` now works over UDP unicast and IPv4 multicast using a sys-layer `UdpSocketHandle`; bound sockets reply to the last datagram peer, connected sockets use connected UDP sends, multicast receivers join `239.x.x.x` groups on loopback for local delivery, and native/C ABI tests cover unicast and multicast round trips. `ws://` transport now works with a minimal HTTP WebSocket upgrade handshake and binary WebSocket frames carrying ZMTP v3 frames; native/C ABI PAIR tests cover WS round trips. `wss://` transport now works behind the explicit `wss` feature using rustls over the WebSocket frame path with a local self-signed certificate; native/C ABI PAIR tests cover WSS under `--all-features`. WSS TLS dependencies remain feature-gated so the default Linux cross-target workspace check passes without a Linux C cross-compiler; enabling `wss` for a non-host target still requires the C toolchain needed by rustls crypto providers. Native Rust and C ABI tests cover inproc and TCP round trips, UDP `DGRAM` round trips, WS/WSS PAIR round trips, inproc `SERVER`/`CLIENT` and `PEER` routing ids, inproc `SCATTER` load balancing, and `RADIO`/`DISH` group filtering. Remaining optional transports PGM/EPGM, NORM, TIPC, VMCI, and VSOCK now have explicit `NotSupported`/`ENOTSUP` regression coverage rather than accidental fallthrough; OpenPGM and NORM development packages are not available through `pkg-config` in this environment, and TIPC/VMCI/VSOCK require platform-specific kernel/socket support before real transport tests can be enabled.
 
-## Phase 12: Performance Gate [~]
+## Phase 12: Performance Gate [x]
 
 Goal: prove performance regression is below 5%.
 
@@ -429,11 +429,11 @@ Goal: prove performance regression is below 5%.
 - [x] Implement tcp throughput benchmark.
 - [x] Implement ipc latency benchmark.
 - [x] Implement ipc throughput benchmark.
-- [ ] Implement proxy throughput benchmark.
-- [ ] Implement subscription lookup benchmark.
-- [ ] Implement CURVE throughput benchmark.
-- [ ] Implement WS throughput benchmark.
-- [ ] Implement WSS throughput benchmark.
+- [x] Implement proxy throughput benchmark.
+- [x] Implement subscription lookup benchmark.
+- [x] Implement CURVE throughput benchmark.
+- [x] Implement WS throughput benchmark.
+- [x] Implement WSS throughput benchmark.
 - [x] Add benchmark runner for C++ original.
 - [x] Add benchmark runner for Rust implementation.
 - [x] Add median comparison gate.
@@ -444,9 +444,9 @@ Completion checks:
 - [x] Latency passes with `rust_median <= cpp_median * 1.05`.
 - [x] Throughput passes with `rust_median >= cpp_median * 0.95`.
 - [x] P0 performance cases all pass.
-- [~] Full performance report is generated.
+- [x] Full performance report is generated.
 
-Status note: Phase 12 is in progress. `performance-gate` now compares the Rust C ABI implementation against the original C++ `libzmq` oracle loaded from `LIBZMQ_ORACLE` or `../libzmq/build-ru-oracle/lib/libzmq.dylib`, using release-mode medians and a 5% latency/throughput gate. Current P0 coverage includes inproc, TCP, and IPC latency/throughput. The latest report at `docs/performance-report.md` was generated with `cargo run --release -p libzmq-test-harness --bin performance-gate -- --iterations 5000 --samples 5 --write docs/performance-report.md`; all covered P0 cases pass. Inproc hot path optimizations added during this phase include direct slice-backed message construction for C ABI sends, a consuming inproc send fast path, atomic receive-more state, and avoiding REQ/REP FSM locks on socket types without FSMs. Remaining work: proxy throughput, subscription lookup, CURVE throughput, WS throughput, and WSS throughput benchmark coverage.
+Status note: Phase 12 completed. `performance-gate` compares the Rust C ABI implementation against the original C++ `libzmq` oracle loaded from `LIBZMQ_ORACLE` or `../libzmq/build-ru-oracle/lib/libzmq.dylib`, using release-mode medians and a 5% latency/throughput gate. Coverage includes inproc, TCP, IPC, proxy throughput, subscription lookup, CURVE throughput, WS throughput, and WSS throughput cases. The latest report at `docs/performance-report.md` was generated with `LIBZMQ_ORACLE=../libzmq/build-ru-oracle-wss/lib/libzmq.dylib cargo run --release -p libzmq-test-harness --features wss,sodium --bin performance-gate -- --iterations 1000 --samples 3 --write docs/performance-report.md`; all cases pass the 5% gate. A WSS-capable C++ oracle was built under `../libzmq/build-ru-oracle-wss` after installing GnuTLS and enabling `WITH_TLS=ON`. Optimizations added during this phase include direct slice-backed message construction for C ABI sends, consuming inproc send fast paths, atomic receive-more state, avoiding REQ/REP FSM locks on socket types without FSMs, hash-indexed subscription lookup with first-byte and length filters, single-subscriber PUB inproc fast send, direct CURVE MESSAGE frame encode/decode, synchronous CURVE throughput measurement after handshake warmup, WSS TLS credential setup for the C++ oracle harness path, and optional libsodium `crypto_box_afternm` acceleration isolated behind `libzmq-sys`.
 
 ## Phase 13: Unsafe Gate [x]
 
@@ -467,7 +467,7 @@ Completion checks:
 - [x] Full feature unsafe target passes.
 - [x] No unsafe exists in unapproved modules.
 
-Status note: Phase 13 completed with `cargo run -p libzmq-test-harness --bin unsafe-report -- --write docs/unsafe-report.md`. The generated report separates production source from test harness/oracle source, excludes generated bindings because none are present, and enforces production unsafe only under `crates/libzmq-ffi/src/` and `crates/libzmq-sys/src/`. Current production source has 81 unsafe lines across 8,302 nonblank code lines for a 0.98% unsafe-line ratio, below both the 8% default-feature gate and 10% full-feature handwritten gate. `cargo clippy --workspace --all-features --all-targets` passes; production source keeps `clippy::undocumented_unsafe_blocks` enforcement, while C ABI tests and C++ oracle harnesses carry explicit test/harness-only exemptions because they intentionally exercise raw-pointer boundaries outside the production unsafe percentage gate.
+Status note: Phase 13 completed with `cargo run -p libzmq-test-harness --bin unsafe-report -- --write docs/unsafe-report.md`. The generated report separates production source from test harness/oracle source, excludes generated bindings because none are present, and enforces production unsafe only under `crates/libzmq-ffi/src/` and `crates/libzmq-sys/src/`. Current production source has 87 unsafe lines across 8,681 nonblank code lines for a 1.00% unsafe-line ratio, below both the 8% default-feature gate and 10% full-feature handwritten gate. `cargo clippy --workspace --all-features --all-targets` passes; production source keeps `clippy::undocumented_unsafe_blocks` enforcement, while C ABI tests and C++ oracle harnesses carry explicit test/harness-only exemptions because they intentionally exercise raw-pointer boundaries outside the production unsafe percentage gate.
 
 ## Phase 14: Release Hardening [ ]
 

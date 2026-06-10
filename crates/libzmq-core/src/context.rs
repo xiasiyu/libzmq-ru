@@ -1,5 +1,5 @@
 use crate::{Error, Message, Result, Socket, SocketType};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -22,8 +22,86 @@ pub(crate) struct ContextShared {
 }
 
 pub(crate) type MessageQueue = Arc<Mutex<VecDeque<Message>>>;
-pub(crate) type SubscriptionSet = Arc<Mutex<Vec<Vec<u8>>>>;
+pub(crate) type SubscriptionSet = Arc<Mutex<SubscriptionState>>;
 pub(crate) type WelcomeMessage = Arc<Mutex<Option<Vec<u8>>>>;
+
+#[derive(Debug)]
+pub(crate) struct SubscriptionState {
+    prefixes: Vec<Vec<u8>>,
+    exact: HashSet<Vec<u8>>,
+    first_bytes: [bool; 256],
+    lengths: Vec<usize>,
+    has_empty: bool,
+}
+
+impl Default for SubscriptionState {
+    fn default() -> Self {
+        Self {
+            prefixes: Vec::new(),
+            exact: HashSet::new(),
+            first_bytes: [false; 256],
+            lengths: Vec::new(),
+            has_empty: false,
+        }
+    }
+}
+
+impl SubscriptionState {
+    pub(crate) fn insert(&mut self, prefix: &[u8]) -> bool {
+        if !self.exact.insert(prefix.to_vec()) {
+            return false;
+        }
+        self.has_empty |= prefix.is_empty();
+        if let Some(first) = prefix.first() {
+            self.first_bytes[*first as usize] = true;
+        }
+        if !self.lengths.contains(&prefix.len()) {
+            self.lengths.push(prefix.len());
+        }
+        self.prefixes.push(prefix.to_vec());
+        true
+    }
+
+    pub(crate) fn remove(&mut self, prefix: &[u8]) {
+        if self.exact.remove(prefix) {
+            self.prefixes.retain(|stored| stored.as_slice() != prefix);
+            self.has_empty = self.exact.contains(&[][..]);
+            self.first_bytes = [false; 256];
+            self.lengths.clear();
+            for stored in &self.prefixes {
+                if let Some(first) = stored.first() {
+                    self.first_bytes[*first as usize] = true;
+                }
+                if !self.lengths.contains(&stored.len()) {
+                    self.lengths.push(stored.len());
+                }
+            }
+        }
+    }
+
+    fn iter_prefixes(&self) -> impl Iterator<Item = &[u8]> {
+        self.prefixes.iter().map(Vec::as_slice)
+    }
+
+    fn matches_prefix_of(&self, data: &[u8]) -> bool {
+        if self.has_empty {
+            return true;
+        }
+        if data
+            .first()
+            .is_none_or(|first| !self.first_bytes[*first as usize])
+        {
+            return false;
+        }
+        self.lengths
+            .iter()
+            .any(|len| *len <= data.len() && self.exact.contains(&data[..*len]))
+    }
+
+    fn contains_exact(&self, value: &[u8]) -> bool {
+        self.exact.contains(value)
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct InprocEndpoint {
@@ -138,6 +216,31 @@ impl InprocEndpoint {
         Ok(outboxes)
     }
 
+    pub(crate) fn send_owned_to_matching_peers(&self, message: Message) -> Result<usize> {
+        let peers = self.peers.lock().map_err(|_| Error::InvalidSocket)?;
+        if let [peer] = peers.as_slice() {
+            if socket_type_accepts_message(peer.socket_type, &peer.subscriptions, &message)? {
+                peer.inbox
+                    .lock()
+                    .map_err(|_| Error::InvalidSocket)?
+                    .push_back(message);
+                return Ok(1);
+            }
+            return Ok(0);
+        }
+        let mut sent = 0;
+        for peer in peers.iter() {
+            if socket_type_accepts_message(peer.socket_type, &peer.subscriptions, &message)? {
+                peer.inbox
+                    .lock()
+                    .map_err(|_| Error::InvalidSocket)?
+                    .push_back(message.clone());
+                sent += 1;
+            }
+        }
+        Ok(sent)
+    }
+
     pub(crate) fn replay_subscription(&self, prefix: &[u8]) -> Result<()> {
         if self.binder_type != SocketType::Xpub {
             return Ok(());
@@ -160,7 +263,7 @@ impl InprocEndpoint {
             .subscriptions
             .lock()
             .map_err(|_| Error::InvalidSocket)?;
-        for prefix in subscriptions.iter() {
+        for prefix in subscriptions.iter_prefixes() {
             self.replay_subscription(prefix)?;
         }
         Ok(())
@@ -218,14 +321,10 @@ fn socket_type_accepts_message(
 ) -> Result<bool> {
     let subscriptions = subscriptions.lock().map_err(|_| Error::InvalidSocket)?;
     match socket_type {
-        SocketType::Sub | SocketType::Xsub => Ok(subscriptions
-            .iter()
-            .any(|prefix| message.data().starts_with(prefix))),
-        SocketType::Dish => Ok(message.group().is_some_and(|group| {
-            subscriptions
-                .iter()
-                .any(|stored| stored == group.as_bytes())
-        })),
+        SocketType::Sub | SocketType::Xsub => Ok(subscriptions.matches_prefix_of(message.data())),
+        SocketType::Dish => Ok(message
+            .group()
+            .is_some_and(|group| subscriptions.contains_exact(group.as_bytes()))),
         _ => Ok(true),
     }
 }

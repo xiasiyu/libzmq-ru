@@ -21,6 +21,7 @@ zeroize = "1"
 
 [features]
 default = []
+sodium = ["libzmq-sys/sodium"]
 wss = ["dep:rcgen", "dep:rustls"]
 
 [lints]
