@@ -8,7 +8,20 @@ license.workspace = true
 name = "libzmq_core"
 
 [dependencies]
+base64 = "0.22"
+crypto_box = "0.10.0-pre.0"
+crypto_secretbox = "0.2.0-pre.0"
+curve25519-dalek = "4"
+getrandom = "0.2"
 libzmq-sys.workspace = true
+rcgen = { version = "0.13", optional = true }
+rustls = { version = "0.23", optional = true }
+sha1 = "0.10"
+zeroize = "1"
+
+[features]
+default = []
+wss = ["dep:rcgen", "dep:rustls"]
 
 [lints]
 workspace = true

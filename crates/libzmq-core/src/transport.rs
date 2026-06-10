@@ -1,5 +1,5 @@
 use crate::{Error, Result};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 
 pub const ZMTP_GREETING_SIZE: usize = 64;
@@ -11,6 +11,9 @@ const ZMTP_FLAG_COMMAND: u8 = 0x04;
 pub enum Endpoint {
     Inproc(String),
     Tcp(TcpEndpoint),
+    Udp(UdpEndpoint),
+    Ws(WsEndpoint),
+    Wss(WsEndpoint),
     Ipc(IpcEndpoint),
 }
 
@@ -18,6 +21,19 @@ pub enum Endpoint {
 pub struct TcpEndpoint {
     host: String,
     port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UdpEndpoint {
+    host: String,
+    port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WsEndpoint {
+    host: String,
+    port: u16,
+    path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +71,15 @@ impl Endpoint {
         }
         if endpoint.starts_with("tcp://") {
             return TcpEndpoint::parse(endpoint).map(Self::Tcp);
+        }
+        if endpoint.starts_with("udp://") {
+            return UdpEndpoint::parse(endpoint).map(Self::Udp);
+        }
+        if endpoint.starts_with("ws://") {
+            return WsEndpoint::parse(endpoint).map(Self::Ws);
+        }
+        if endpoint.starts_with("wss://") {
+            return WsEndpoint::parse_wss(endpoint).map(Self::Wss);
         }
         if endpoint.starts_with("ipc://") {
             return IpcEndpoint::parse(endpoint).map(Self::Ipc);
@@ -103,6 +128,101 @@ impl TcpEndpoint {
     }
 }
 
+impl UdpEndpoint {
+    pub fn parse(endpoint: &str) -> Result<Self> {
+        let authority = endpoint
+            .strip_prefix("udp://")
+            .ok_or(Error::InvalidArgument)?;
+        let (host, port) = split_host_port(authority)?;
+        if host.is_empty() {
+            return Err(Error::InvalidArgument);
+        }
+        Ok(Self {
+            host: host.to_string(),
+            port,
+        })
+    }
+
+    pub fn bind_addr(&self) -> String {
+        let host = if self.host == "*" {
+            "0.0.0.0"
+        } else if self.multicast_v4().is_some() {
+            "0.0.0.0"
+        } else {
+            &self.host
+        };
+        format_host_port(host, self.port)
+    }
+
+    pub fn connect_addr(&self) -> Result<String> {
+        if self.host == "*" {
+            return Err(Error::InvalidArgument);
+        }
+        Ok(format_host_port(&self.host, self.port))
+    }
+
+    pub fn multicast_v4(&self) -> Option<Ipv4Addr> {
+        match self.host.parse::<IpAddr>().ok()? {
+            IpAddr::V4(addr) if addr.is_multicast() => Some(addr),
+            _ => None,
+        }
+    }
+}
+
+impl WsEndpoint {
+    pub fn parse(endpoint: &str) -> Result<Self> {
+        Self::parse_with_prefix(endpoint, "ws://")
+    }
+
+    pub fn parse_wss(endpoint: &str) -> Result<Self> {
+        Self::parse_with_prefix(endpoint, "wss://")
+    }
+
+    fn parse_with_prefix(endpoint: &str, prefix: &str) -> Result<Self> {
+        let authority = endpoint
+            .strip_prefix(prefix)
+            .ok_or(Error::InvalidArgument)?;
+        let (authority, path) = authority.split_once('/').unwrap_or((authority, ""));
+        let (host, port) = split_host_port(authority)?;
+        if host.is_empty() {
+            return Err(Error::InvalidArgument);
+        }
+        Ok(Self {
+            host: host.to_string(),
+            port,
+            path: format!("/{path}"),
+        })
+    }
+
+    pub fn bind_addr(&self) -> String {
+        let host = if self.host == "*" {
+            "0.0.0.0"
+        } else {
+            &self.host
+        };
+        format_host_port(host, self.port)
+    }
+
+    pub fn connect_addr(&self) -> Result<String> {
+        if self.host == "*" {
+            return Err(Error::InvalidArgument);
+        }
+        Ok(format_host_port(&self.host, self.port))
+    }
+
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+}
+
 impl IpcEndpoint {
     pub fn parse(endpoint: &str) -> Result<Self> {
         let path = endpoint
@@ -122,20 +242,21 @@ impl IpcEndpoint {
 }
 
 impl ZmtpGreeting {
-    pub fn null_client() -> Self {
+    pub fn new(mechanism: impl Into<String>, as_server: bool) -> Self {
         Self {
             major: 3,
             minor: 1,
-            mechanism: "NULL".to_string(),
-            as_server: false,
+            mechanism: mechanism.into(),
+            as_server,
         }
     }
 
+    pub fn null_client() -> Self {
+        Self::new("NULL", false)
+    }
+
     pub fn null_server() -> Self {
-        Self {
-            as_server: true,
-            ..Self::null_client()
-        }
+        Self::new("NULL", true)
     }
 
     pub fn major(&self) -> u8 {
@@ -164,6 +285,7 @@ impl ZmtpGreeting {
         let mechanism = self.mechanism.as_bytes();
         let len = mechanism.len().min(20);
         bytes[12..12 + len].copy_from_slice(&mechanism[..len]);
+        bytes[32] = u8::from(self.as_server);
         bytes
     }
 
@@ -401,6 +523,49 @@ mod tests {
     }
 
     #[test]
+    fn parses_udp_endpoints() {
+        let endpoint = UdpEndpoint::parse("udp://127.0.0.1:5555").unwrap();
+        assert_eq!(endpoint.connect_addr().unwrap(), "127.0.0.1:5555");
+
+        let wildcard = UdpEndpoint::parse("udp://*:0").unwrap();
+        assert_eq!(wildcard.bind_addr(), "0.0.0.0:0");
+        assert_eq!(wildcard.connect_addr(), Err(Error::InvalidArgument));
+        assert!(matches!(
+            Endpoint::parse("udp://127.0.0.1:5555").unwrap(),
+            Endpoint::Udp(_)
+        ));
+
+        let multicast = UdpEndpoint::parse("udp://239.255.0.1:5555").unwrap();
+        assert_eq!(multicast.bind_addr(), "0.0.0.0:5555");
+        assert_eq!(multicast.connect_addr().unwrap(), "239.255.0.1:5555");
+        assert_eq!(multicast.multicast_v4().unwrap().octets(), [239, 255, 0, 1]);
+    }
+
+    #[test]
+    fn parses_ws_endpoints() {
+        let endpoint = WsEndpoint::parse("ws://127.0.0.1:8080/socket").unwrap();
+        assert_eq!(endpoint.host(), "127.0.0.1");
+        assert_eq!(endpoint.port(), 8080);
+        assert_eq!(endpoint.path(), "/socket");
+        assert_eq!(endpoint.connect_addr().unwrap(), "127.0.0.1:8080");
+
+        let default_path = WsEndpoint::parse("ws://127.0.0.1:8080").unwrap();
+        assert_eq!(default_path.path(), "/");
+
+        let wildcard = WsEndpoint::parse("ws://*:8080").unwrap();
+        assert_eq!(wildcard.bind_addr(), "0.0.0.0:8080");
+        assert_eq!(wildcard.connect_addr(), Err(Error::InvalidArgument));
+        assert!(matches!(
+            Endpoint::parse("ws://127.0.0.1:8080/socket").unwrap(),
+            Endpoint::Ws(_)
+        ));
+        assert!(matches!(
+            Endpoint::parse("wss://127.0.0.1:8443/socket").unwrap(),
+            Endpoint::Wss(_)
+        ));
+    }
+
+    #[test]
     fn parses_ipc_and_inproc_endpoints() {
         let ipc = IpcEndpoint::parse("ipc:///tmp/libzmq.sock").unwrap();
         assert_eq!(ipc.path(), "/tmp/libzmq.sock");
@@ -412,13 +577,27 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_optional_transport_schemes_are_explicit() {
+        for endpoint in [
+            "pgm://127.0.0.1:5555",
+            "epgm://127.0.0.1:5555",
+            "norm://127.0.0.1:5555",
+            "tipc://{5560,0,0}",
+            "vmci://1:5555",
+            "vsock://2:5555",
+        ] {
+            assert_eq!(Endpoint::parse(endpoint), Err(Error::NotSupported));
+        }
+    }
+
+    #[test]
     fn zmtp_greeting_round_trips() {
         let encoded = ZmtpGreeting::null_server().encode();
         let decoded = ZmtpGreeting::decode(&encoded).unwrap();
         assert_eq!(decoded.major(), 3);
         assert_eq!(decoded.minor(), 1);
         assert_eq!(decoded.mechanism(), "NULL");
-        assert_eq!(decoded.mechanism(), "NULL");
+        assert!(decoded.as_server());
     }
 
     #[test]

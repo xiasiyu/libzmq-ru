@@ -1,11 +1,14 @@
 use libzmq::{
-    version, Context, Error, Message, SocketType, ZMQ_CONFLATE, ZMQ_IO_THREADS, ZMQ_LINGER,
-    ZMQ_MAX_SOCKETS, ZMQ_RCVHWM, ZMQ_RCVMORE, ZMQ_REQ_RELAXED, ZMQ_ROUTER_HANDOVER,
-    ZMQ_ROUTER_MANDATORY, ZMQ_SNDHWM, ZMQ_SNDMORE, ZMQ_TYPE, ZMQ_XPUB_MANUAL, ZMQ_XPUB_NODROP,
-    ZMQ_XPUB_VERBOSE, ZMQ_XPUB_WELCOME_MSG,
+    curve_keypair, version, Context, Error, Message, SocketType, ZMQ_CONFLATE, ZMQ_CURVE,
+    ZMQ_CURVE_PUBLICKEY, ZMQ_CURVE_SECRETKEY, ZMQ_CURVE_SERVER, ZMQ_CURVE_SERVERKEY, ZMQ_GSSAPI,
+    ZMQ_GSSAPI_PRINCIPAL, ZMQ_GSSAPI_SERVER, ZMQ_GSSAPI_SERVICE_PRINCIPAL, ZMQ_IO_THREADS,
+    ZMQ_LINGER, ZMQ_MAX_SOCKETS, ZMQ_MECHANISM, ZMQ_NULL, ZMQ_PLAIN, ZMQ_PLAIN_PASSWORD,
+    ZMQ_PLAIN_SERVER, ZMQ_PLAIN_USERNAME, ZMQ_RCVHWM, ZMQ_RCVMORE, ZMQ_REQ_RELAXED,
+    ZMQ_ROUTER_HANDOVER, ZMQ_ROUTER_MANDATORY, ZMQ_SNDHWM, ZMQ_SNDMORE, ZMQ_TYPE, ZMQ_XPUB_MANUAL,
+    ZMQ_XPUB_NODROP, ZMQ_XPUB_VERBOSE, ZMQ_XPUB_WELCOME_MSG, ZMQ_ZAP_DOMAIN,
 };
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, UdpSocket};
 
 #[test]
 fn native_version_matches_c_abi_contract() {
@@ -80,6 +83,17 @@ fn native_unimplemented_socket_operations_are_explicit() {
         socket.connect("udp://127.0.0.1:1"),
         Err(Error::NotSupported)
     );
+    for endpoint in [
+        "pgm://127.0.0.1:1",
+        "epgm://127.0.0.1:1",
+        "norm://127.0.0.1:1",
+        "tipc://{5560,0,0}",
+        "vmci://1:1",
+        "vsock://2:1",
+    ] {
+        assert_eq!(socket.bind(endpoint), Err(Error::NotSupported));
+        assert_eq!(socket.connect(endpoint), Err(Error::NotSupported));
+    }
     assert_eq!(socket.send("hello"), Err(Error::Again));
     assert_eq!(socket.recv(), Err(Error::Again));
 }
@@ -96,12 +110,565 @@ fn native_pair_tcp_round_trip() {
     client.connect(&endpoint).unwrap();
 
     assert_eq!(client.send("hello").unwrap(), 5);
-    let received = server.recv().unwrap();
+    let received = recv_retry_native(&server).unwrap();
     assert_eq!(received.data(), b"hello");
 
     assert_eq!(server.send("world").unwrap(), 5);
     let received = client.recv().unwrap();
     assert_eq!(received.data(), b"world");
+}
+
+#[test]
+fn native_pair_ws_round_trip() {
+    let port = unused_tcp_port();
+    let endpoint = format!("ws://127.0.0.1:{port}/zmq");
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    assert_eq!(client.send("hello").unwrap(), 5);
+    let received = recv_retry_native(&server).unwrap();
+    assert_eq!(received.data(), b"hello");
+
+    assert_eq!(server.send("world").unwrap(), 5);
+    let received = client.recv().unwrap();
+    assert_eq!(received.data(), b"world");
+}
+
+#[test]
+#[cfg(feature = "wss")]
+fn native_pair_wss_round_trip() {
+    let port = unused_tcp_port();
+    let endpoint = format!("wss://127.0.0.1:{port}/zmq");
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    let client_thread = std::thread::spawn(move || {
+        client.send("hello")?;
+        client.recv().map(|message| message.data().to_vec())
+    });
+    let received = recv_retry_native(&server).unwrap();
+    assert_eq!(received.data(), b"hello");
+
+    assert_eq!(server.send("world").unwrap(), 5);
+    assert_eq!(client_thread.join().unwrap().unwrap(), b"world");
+}
+
+#[test]
+fn native_server_client_tcp_round_trip() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Server).unwrap();
+    let client = ctx.socket(SocketType::Client).unwrap();
+
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    assert_eq!(client.send("hello").unwrap(), 5);
+    let received = recv_retry_native(&server).unwrap();
+    assert_eq!(received.data(), b"hello");
+
+    assert_eq!(server.send("world").unwrap(), 5);
+    let received = client.recv().unwrap();
+    assert_eq!(received.data(), b"world");
+}
+
+#[test]
+fn native_channel_tcp_round_trip() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Channel).unwrap();
+    let client = ctx.socket(SocketType::Channel).unwrap();
+
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    assert_eq!(client.send("hello").unwrap(), 5);
+    let received = recv_retry_native(&server).unwrap();
+    assert_eq!(received.data(), b"hello");
+
+    assert_eq!(server.send("world").unwrap(), 5);
+    let received = client.recv().unwrap();
+    assert_eq!(received.data(), b"world");
+}
+
+#[test]
+fn native_scatter_gather_tcp_round_trip() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let gather = ctx.socket(SocketType::Gather).unwrap();
+    let scatter = ctx.socket(SocketType::Scatter).unwrap();
+
+    gather.bind(&endpoint).unwrap();
+    scatter.connect(&endpoint).unwrap();
+
+    assert_eq!(scatter.send("job").unwrap(), 3);
+    let received = recv_retry_native(&gather).unwrap();
+    assert_eq!(received.data(), b"job");
+}
+
+#[test]
+fn native_pair_tcp_plain_round_trip() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    server.set_option_i32(ZMQ_PLAIN_SERVER, 1).unwrap();
+    client
+        .set_option_bytes(ZMQ_PLAIN_USERNAME, b"user")
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_PLAIN_PASSWORD, b"pass")
+        .unwrap();
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    let sender = std::thread::spawn(move || client.send("hello"));
+    let received = recv_retry_native(&server).unwrap();
+    assert_eq!(received.data(), b"hello");
+    assert_eq!(sender.join().unwrap().unwrap(), 5);
+}
+
+#[test]
+fn native_pair_tcp_plain_rejects_bad_credentials() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    server.set_option_i32(ZMQ_PLAIN_SERVER, 1).unwrap();
+    server
+        .set_option_bytes(ZMQ_PLAIN_USERNAME, b"expected")
+        .unwrap();
+    server
+        .set_option_bytes(ZMQ_PLAIN_PASSWORD, b"secret")
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_PLAIN_USERNAME, b"wrong")
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_PLAIN_PASSWORD, b"secret")
+        .unwrap();
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    let sender = std::thread::spawn(move || client.send("hello"));
+    assert_eq!(recv_retry_error_native(&server), Error::InvalidArgument);
+    assert!(sender.join().unwrap().is_err());
+}
+
+#[test]
+fn native_pair_tcp_plain_uses_zap_actor() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let zap = ctx.socket(SocketType::Rep).unwrap();
+    zap.bind("inproc://zeromq.zap.01").unwrap();
+    let zap_thread = spawn_plain_zap_actor(zap, true);
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    server.set_option_i32(ZMQ_PLAIN_SERVER, 1).unwrap();
+    server.set_option_bytes(ZMQ_ZAP_DOMAIN, b"domain").unwrap();
+    client
+        .set_option_bytes(ZMQ_PLAIN_USERNAME, b"user")
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_PLAIN_PASSWORD, b"pass")
+        .unwrap();
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    let sender = std::thread::spawn(move || client.send("hello"));
+    let received = recv_retry_native(&server).unwrap();
+    assert_eq!(received.data(), b"hello");
+    assert_eq!(sender.join().unwrap().unwrap(), 5);
+    zap_thread.join().unwrap();
+}
+
+#[test]
+fn native_pair_tcp_plain_rejects_zap_denial() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let zap = ctx.socket(SocketType::Rep).unwrap();
+    zap.bind("inproc://zeromq.zap.01").unwrap();
+    let zap_thread = spawn_plain_zap_actor(zap, false);
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    server.set_option_i32(ZMQ_PLAIN_SERVER, 1).unwrap();
+    client
+        .set_option_bytes(ZMQ_PLAIN_USERNAME, b"user")
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_PLAIN_PASSWORD, b"pass")
+        .unwrap();
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    let sender = std::thread::spawn(move || client.send("hello"));
+    assert_eq!(recv_retry_error_native(&server), Error::InvalidArgument);
+    assert!(sender.join().unwrap().is_err());
+    zap_thread.join().unwrap();
+}
+
+#[test]
+fn native_pair_tcp_curve_round_trip() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+    let (server_public, server_secret) = curve_keypair().unwrap();
+    let (client_public, client_secret) = curve_keypair().unwrap();
+
+    server.set_option_i32(ZMQ_CURVE_SERVER, 1).unwrap();
+    server
+        .set_option_bytes(ZMQ_CURVE_SECRETKEY, server_secret.as_bytes())
+        .unwrap();
+    server
+        .set_option_bytes(ZMQ_CURVE_PUBLICKEY, client_public.as_bytes())
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_CURVE_SERVERKEY, server_public.as_bytes())
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_CURVE_PUBLICKEY, client_public.as_bytes())
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_CURVE_SECRETKEY, client_secret.as_bytes())
+        .unwrap();
+    assert_eq!(server.get_option_i32(ZMQ_MECHANISM).unwrap(), ZMQ_CURVE);
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    let sender = std::thread::spawn(move || client.send("curve"));
+    let received = recv_retry_native(&server).unwrap();
+    assert_eq!(received.data(), b"curve");
+    assert_eq!(sender.join().unwrap().unwrap(), 5);
+}
+
+#[test]
+fn native_pair_tcp_curve_rejects_unknown_client_key() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+    let (server_public, server_secret) = curve_keypair().unwrap();
+    let (allowed_public, _) = curve_keypair().unwrap();
+    let (client_public, client_secret) = curve_keypair().unwrap();
+
+    server.set_option_i32(ZMQ_CURVE_SERVER, 1).unwrap();
+    server
+        .set_option_bytes(ZMQ_CURVE_SECRETKEY, server_secret.as_bytes())
+        .unwrap();
+    server
+        .set_option_bytes(ZMQ_CURVE_PUBLICKEY, allowed_public.as_bytes())
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_CURVE_SERVERKEY, server_public.as_bytes())
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_CURVE_PUBLICKEY, client_public.as_bytes())
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_CURVE_SECRETKEY, client_secret.as_bytes())
+        .unwrap();
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    let sender = std::thread::spawn(move || client.send("curve"));
+    assert_eq!(recv_retry_error_native(&server), Error::InvalidArgument);
+    assert!(sender.join().unwrap().is_err());
+}
+
+#[test]
+fn native_pair_tcp_curve_uses_zap_actor() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let zap = ctx.socket(SocketType::Rep).unwrap();
+    zap.bind("inproc://zeromq.zap.01").unwrap();
+    let zap_thread = spawn_curve_zap_actor(zap, true);
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+    let (server_public, server_secret) = curve_keypair().unwrap();
+    let (client_public, client_secret) = curve_keypair().unwrap();
+
+    server.set_option_i32(ZMQ_CURVE_SERVER, 1).unwrap();
+    server
+        .set_option_bytes(ZMQ_CURVE_SECRETKEY, server_secret.as_bytes())
+        .unwrap();
+    server.set_option_bytes(ZMQ_ZAP_DOMAIN, b"domain").unwrap();
+    client
+        .set_option_bytes(ZMQ_CURVE_SERVERKEY, server_public.as_bytes())
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_CURVE_PUBLICKEY, client_public.as_bytes())
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_CURVE_SECRETKEY, client_secret.as_bytes())
+        .unwrap();
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    let sender = std::thread::spawn(move || client.send("curve"));
+    let received = recv_retry_native(&server).unwrap();
+    assert_eq!(received.data(), b"curve");
+    assert_eq!(sender.join().unwrap().unwrap(), 5);
+    zap_thread.join().unwrap();
+}
+
+#[test]
+fn native_pair_tcp_gssapi_round_trip() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    server.set_option_i32(ZMQ_GSSAPI_SERVER, 1).unwrap();
+    server
+        .set_option_bytes(ZMQ_GSSAPI_PRINCIPAL, b"client@EXAMPLE")
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_GSSAPI_PRINCIPAL, b"client@EXAMPLE")
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_GSSAPI_SERVICE_PRINCIPAL, b"server@EXAMPLE")
+        .unwrap();
+    assert_eq!(server.get_option_i32(ZMQ_MECHANISM).unwrap(), ZMQ_GSSAPI);
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    let sender = std::thread::spawn(move || client.send("gss"));
+    let received = recv_retry_native(&server).unwrap();
+    assert_eq!(received.data(), b"gss");
+    assert_eq!(sender.join().unwrap().unwrap(), 3);
+}
+
+#[test]
+fn native_pair_tcp_gssapi_rejects_bad_principal() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    server.set_option_i32(ZMQ_GSSAPI_SERVER, 1).unwrap();
+    server
+        .set_option_bytes(ZMQ_GSSAPI_PRINCIPAL, b"expected@EXAMPLE")
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_GSSAPI_PRINCIPAL, b"wrong@EXAMPLE")
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_GSSAPI_SERVICE_PRINCIPAL, b"server@EXAMPLE")
+        .unwrap();
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    let sender = std::thread::spawn(move || client.send("gss"));
+    assert!(matches!(server.recv(), Err(Error::InvalidArgument)));
+    assert!(sender.join().unwrap().is_err());
+}
+
+#[test]
+fn native_pair_tcp_gssapi_uses_zap_actor() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let zap = ctx.socket(SocketType::Rep).unwrap();
+    zap.bind("inproc://zeromq.zap.01").unwrap();
+    let zap_thread = spawn_gssapi_zap_actor(zap, true);
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    server.set_option_i32(ZMQ_GSSAPI_SERVER, 1).unwrap();
+    server.set_option_bytes(ZMQ_ZAP_DOMAIN, b"domain").unwrap();
+    client
+        .set_option_bytes(ZMQ_GSSAPI_PRINCIPAL, b"client@EXAMPLE")
+        .unwrap();
+    client
+        .set_option_bytes(ZMQ_GSSAPI_SERVICE_PRINCIPAL, b"server@EXAMPLE")
+        .unwrap();
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    let sender = std::thread::spawn(move || client.send("gss"));
+    let received = recv_retry_native(&server).unwrap();
+    assert_eq!(received.data(), b"gss");
+    assert_eq!(sender.join().unwrap().unwrap(), 3);
+    zap_thread.join().unwrap();
+}
+
+fn spawn_plain_zap_actor(zap: libzmq::Socket, accept: bool) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut frames = Vec::new();
+        loop {
+            let message = recv_retry_native(&zap).unwrap();
+            let more = message.more();
+            frames.push(message.data().to_vec());
+            if !more {
+                break;
+            }
+        }
+        assert_eq!(frames[0], b"1.0");
+        assert_eq!(frames[5], b"PLAIN");
+        assert_eq!(frames[6], b"user");
+        assert_eq!(frames[7], b"pass");
+        let status = if accept {
+            b"200".as_slice()
+        } else {
+            b"400".as_slice()
+        };
+        let text = if accept {
+            b"OK".as_slice()
+        } else {
+            b"DENIED".as_slice()
+        };
+        let reply = [
+            b"1.0".as_slice(),
+            frames[1].as_slice(),
+            status,
+            text,
+            b"user".as_slice(),
+            b"".as_slice(),
+        ];
+        for (index, frame) in reply.iter().enumerate() {
+            let flags = if index + 1 == reply.len() {
+                0
+            } else {
+                ZMQ_SNDMORE
+            };
+            zap.send_with_flags(*frame, flags).unwrap();
+        }
+    })
+}
+
+fn spawn_curve_zap_actor(zap: libzmq::Socket, accept: bool) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut frames = Vec::new();
+        loop {
+            let message = recv_retry_native(&zap).unwrap();
+            let more = message.more();
+            frames.push(message.data().to_vec());
+            if !more {
+                break;
+            }
+        }
+        assert_eq!(frames[0], b"1.0");
+        assert_eq!(frames[2], b"domain");
+        assert_eq!(frames[5], b"CURVE");
+        assert_eq!(frames[6].len(), 32);
+        let status = if accept {
+            b"200".as_slice()
+        } else {
+            b"400".as_slice()
+        };
+        let text = if accept {
+            b"OK".as_slice()
+        } else {
+            b"DENIED".as_slice()
+        };
+        let reply = [
+            b"1.0".as_slice(),
+            frames[1].as_slice(),
+            status,
+            text,
+            b"user".as_slice(),
+            b"".as_slice(),
+        ];
+        for (index, frame) in reply.iter().enumerate() {
+            let flags = if index + 1 == reply.len() {
+                0
+            } else {
+                ZMQ_SNDMORE
+            };
+            zap.send_with_flags(*frame, flags).unwrap();
+        }
+    })
+}
+
+fn spawn_gssapi_zap_actor(zap: libzmq::Socket, accept: bool) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut frames = Vec::new();
+        loop {
+            let message = recv_retry_native(&zap).unwrap();
+            let more = message.more();
+            frames.push(message.data().to_vec());
+            if !more {
+                break;
+            }
+        }
+        assert_eq!(frames[0], b"1.0");
+        assert_eq!(frames[2], b"domain");
+        assert_eq!(frames[5], b"GSSAPI");
+        assert_eq!(frames[6], b"client@EXAMPLE");
+        let status = if accept {
+            b"200".as_slice()
+        } else {
+            b"400".as_slice()
+        };
+        let text = if accept {
+            b"OK".as_slice()
+        } else {
+            b"DENIED".as_slice()
+        };
+        let reply = [
+            b"1.0".as_slice(),
+            frames[1].as_slice(),
+            status,
+            text,
+            b"user".as_slice(),
+            b"".as_slice(),
+        ];
+        for (index, frame) in reply.iter().enumerate() {
+            let flags = if index + 1 == reply.len() {
+                0
+            } else {
+                ZMQ_SNDMORE
+            };
+            zap.send_with_flags(*frame, flags).unwrap();
+        }
+    })
+}
+
+fn recv_retry_native(socket: &libzmq::Socket) -> libzmq::Result<Message> {
+    for _ in 0..100 {
+        match socket.recv() {
+            Ok(message) => return Ok(message),
+            Err(Error::Again) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(Error::Again)
+}
+
+fn recv_retry_error_native(socket: &libzmq::Socket) -> Error {
+    for _ in 0..100 {
+        match socket.recv() {
+            Ok(_) => return Error::InvalidState,
+            Err(Error::Again) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(error) => return error,
+        }
+    }
+    Error::Again
 }
 
 #[test]
@@ -187,6 +754,42 @@ fn native_stream_tcp_uses_raw_bytes() {
     peer.join().unwrap();
 }
 
+#[test]
+fn native_dgram_udp_round_trip() {
+    let port = unused_udp_port();
+    let endpoint = format!("udp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Dgram).unwrap();
+    let client = ctx.socket(SocketType::Dgram).unwrap();
+
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    assert_eq!(client.send("ping").unwrap(), 4);
+    let received = recv_retry_native(&server).unwrap();
+    assert_eq!(received.data(), b"ping");
+
+    assert_eq!(server.send("pong").unwrap(), 4);
+    let received = recv_retry_native(&client).unwrap();
+    assert_eq!(received.data(), b"pong");
+}
+
+#[test]
+fn native_dgram_udp_multicast_receives_group_datagram() {
+    let port = unused_udp_port();
+    let endpoint = format!("udp://239.255.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let receiver = ctx.socket(SocketType::Dgram).unwrap();
+    let sender = ctx.socket(SocketType::Dgram).unwrap();
+
+    receiver.bind(&endpoint).unwrap();
+    sender.connect(&endpoint).unwrap();
+
+    assert_eq!(sender.send("mcast").unwrap(), 5);
+    let received = recv_retry_native(&receiver).unwrap();
+    assert_eq!(received.data(), b"mcast");
+}
+
 #[cfg(unix)]
 #[test]
 fn native_pair_ipc_round_trip() {
@@ -214,6 +817,14 @@ fn native_pair_ipc_round_trip() {
 
 fn unused_tcp_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn unused_udp_port() -> u16 {
+    UdpSocket::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap()
@@ -342,6 +953,68 @@ fn native_push_pull_inproc_round_trip() {
 }
 
 #[test]
+fn native_channel_inproc_round_trip() {
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Channel).unwrap();
+    let client = ctx.socket(SocketType::Channel).unwrap();
+
+    server.bind("inproc://native_channel").unwrap();
+    client.connect("inproc://native_channel").unwrap();
+
+    assert_eq!(client.send("hello").unwrap(), 5);
+    let received = server.recv().unwrap();
+    assert_eq!(received.data(), b"hello");
+
+    assert_eq!(server.send("world").unwrap(), 5);
+    let received = client.recv().unwrap();
+    assert_eq!(received.data(), b"world");
+}
+
+#[test]
+fn native_scatter_gather_inproc_round_trip() {
+    let ctx = Context::new().unwrap();
+    let gather = ctx.socket(SocketType::Gather).unwrap();
+    let scatter = ctx.socket(SocketType::Scatter).unwrap();
+
+    gather.bind("inproc://native_scatter_gather").unwrap();
+    scatter.connect("inproc://native_scatter_gather").unwrap();
+
+    assert_eq!(scatter.send("job").unwrap(), 3);
+    let received = gather.recv().unwrap();
+    assert_eq!(received.data(), b"job");
+}
+
+#[test]
+fn native_scatter_gather_inproc_load_balances_between_gathers() {
+    let ctx = Context::new().unwrap();
+    let scatter = ctx.socket(SocketType::Scatter).unwrap();
+    let gather_a = ctx.socket(SocketType::Gather).unwrap();
+    let gather_b = ctx.socket(SocketType::Gather).unwrap();
+
+    scatter.bind("inproc://native_scatter_lb").unwrap();
+    gather_a.connect("inproc://native_scatter_lb").unwrap();
+    gather_b.connect("inproc://native_scatter_lb").unwrap();
+
+    assert_eq!(scatter.send("one").unwrap(), 3);
+    assert_eq!(scatter.send("two").unwrap(), 3);
+
+    let received = gather_a.recv().unwrap();
+    assert_eq!(received.data(), b"one");
+    let received = gather_b.recv().unwrap();
+    assert_eq!(received.data(), b"two");
+}
+
+#[test]
+fn native_scatter_gather_reject_wrong_direction_operations() {
+    let ctx = Context::new().unwrap();
+    let scatter = ctx.socket(SocketType::Scatter).unwrap();
+    let gather = ctx.socket(SocketType::Gather).unwrap();
+
+    assert_eq!(gather.send("bad"), Err(Error::NotSupported));
+    assert_eq!(scatter.recv(), Err(Error::NotSupported));
+}
+
+#[test]
 fn native_push_pull_inproc_allows_push_bind() {
     let ctx = Context::new().unwrap();
     let push = ctx.socket(SocketType::Push).unwrap();
@@ -427,6 +1100,74 @@ fn native_router_inproc_routes_by_routing_id() {
     let received = dealer_a.recv().unwrap();
     assert_eq!(received.data(), b"targeted");
     assert_eq!(dealer_b.recv(), Err(Error::Again));
+}
+
+#[test]
+fn native_server_client_inproc_round_trip_sets_routing_id() {
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Server).unwrap();
+    let client = ctx.socket(SocketType::Client).unwrap();
+
+    server.bind("inproc://native_server_client").unwrap();
+    client.connect("inproc://native_server_client").unwrap();
+
+    assert_eq!(client.send("request").unwrap(), 7);
+    let received = server.recv().unwrap();
+    assert_eq!(received.data(), b"request");
+    assert_ne!(received.routing_id(), 0);
+
+    assert_eq!(server.send("missing route"), Err(Error::Again));
+
+    let mut reply = Message::from("reply");
+    reply.set_routing_id(received.routing_id());
+    assert_eq!(server.send(reply).unwrap(), 5);
+    let received = client.recv().unwrap();
+    assert_eq!(received.data(), b"reply");
+}
+
+#[test]
+fn native_peer_inproc_round_trip_sets_routing_id() {
+    let ctx = Context::new().unwrap();
+    let bound = ctx.socket(SocketType::Peer).unwrap();
+    let connected = ctx.socket(SocketType::Peer).unwrap();
+
+    bound.bind("inproc://native_peer").unwrap();
+    let peer_id = connected.connect_peer("inproc://native_peer").unwrap();
+    assert_ne!(peer_id, 0);
+
+    assert_eq!(connected.send("request").unwrap(), 7);
+    let received = bound.recv().unwrap();
+    assert_eq!(received.data(), b"request");
+    assert_ne!(received.routing_id(), 0);
+
+    assert_eq!(bound.send("missing route"), Err(Error::Again));
+
+    let mut reply = Message::from("reply");
+    reply.set_routing_id(received.routing_id());
+    assert_eq!(bound.send(reply).unwrap(), 5);
+    let received = connected.recv().unwrap();
+    assert_eq!(received.data(), b"reply");
+}
+
+#[test]
+fn native_peer_tcp_round_trip() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Peer).unwrap();
+    let client = ctx.socket(SocketType::Peer).unwrap();
+
+    server.bind(&endpoint).unwrap();
+    let peer_id = client.connect_peer(&endpoint).unwrap();
+    assert_ne!(peer_id, 0);
+
+    assert_eq!(client.send("hello").unwrap(), 5);
+    let received = recv_retry_native(&server).unwrap();
+    assert_eq!(received.data(), b"hello");
+
+    assert_eq!(server.send("world").unwrap(), 5);
+    let received = client.recv().unwrap();
+    assert_eq!(received.data(), b"world");
 }
 
 #[test]
@@ -521,6 +1262,35 @@ fn native_pub_sub_inproc_filters_by_subscription() {
     assert_eq!(publisher.send("topic:keep").unwrap(), 10);
     let received = subscriber.recv().unwrap();
     assert_eq!(received.data(), b"topic:keep");
+}
+
+#[test]
+fn native_radio_dish_inproc_filters_by_group() {
+    let ctx = Context::new().unwrap();
+    let radio = ctx.socket(SocketType::Radio).unwrap();
+    let dish = ctx.socket(SocketType::Dish).unwrap();
+
+    radio.bind("inproc://native_radio_dish").unwrap();
+    dish.connect("inproc://native_radio_dish").unwrap();
+    dish.join("updates").unwrap();
+
+    let mut ignored = Message::from("old");
+    ignored.set_group("archive").unwrap();
+    assert_eq!(radio.send(ignored).unwrap(), 3);
+    assert_eq!(dish.recv(), Err(Error::Again));
+
+    let mut message = Message::from("new");
+    message.set_group("updates").unwrap();
+    assert_eq!(radio.send(message).unwrap(), 3);
+    let received = dish.recv().unwrap();
+    assert_eq!(received.data(), b"new");
+    assert_eq!(received.group(), Some("updates"));
+
+    dish.leave("updates").unwrap();
+    let mut later = Message::from("later");
+    later.set_group("updates").unwrap();
+    assert_eq!(radio.send(later).unwrap(), 5);
+    assert_eq!(dish.recv(), Err(Error::Again));
 }
 
 #[test]
@@ -648,4 +1418,32 @@ fn native_socket_options_round_trip() {
     assert_eq!(xpub.get_option_i32(ZMQ_XPUB_VERBOSE).unwrap(), 1);
     assert_eq!(xpub.get_option_i32(ZMQ_XPUB_MANUAL).unwrap(), 1);
     assert_eq!(xpub.get_option_i32(ZMQ_XPUB_NODROP).unwrap(), 1);
+}
+
+#[test]
+fn native_security_options_round_trip() {
+    let ctx = Context::new().unwrap();
+    let socket = ctx.socket(SocketType::Req).unwrap();
+
+    assert_eq!(socket.get_option_i32(ZMQ_MECHANISM).unwrap(), ZMQ_NULL);
+    socket.set_option_i32(ZMQ_PLAIN_SERVER, 1).unwrap();
+    socket
+        .set_option_bytes(ZMQ_PLAIN_USERNAME, b"user")
+        .unwrap();
+    socket
+        .set_option_bytes(ZMQ_PLAIN_PASSWORD, b"pass")
+        .unwrap();
+    socket.set_option_bytes(ZMQ_ZAP_DOMAIN, b"domain").unwrap();
+
+    assert_eq!(socket.get_option_i32(ZMQ_MECHANISM).unwrap(), ZMQ_PLAIN);
+    assert_eq!(socket.get_option_i32(ZMQ_PLAIN_SERVER).unwrap(), 1);
+    assert_eq!(
+        socket.get_option_bytes(ZMQ_PLAIN_USERNAME).unwrap(),
+        b"user"
+    );
+    assert_eq!(
+        socket.get_option_bytes(ZMQ_PLAIN_PASSWORD).unwrap(),
+        b"pass"
+    );
+    assert_eq!(socket.get_option_bytes(ZMQ_ZAP_DOMAIN).unwrap(), b"domain");
 }

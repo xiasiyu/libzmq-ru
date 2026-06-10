@@ -46,7 +46,7 @@ udp = []
 vmci = []
 vsock = []
 ws = []
-wss = ["ws"]
+wss = ["ws", "libzmq-core/wss"]
 zap = []
 
 [lints]

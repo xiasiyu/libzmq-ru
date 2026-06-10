@@ -267,17 +267,26 @@ impl FfiMessageInner {
         let mut message = Message::from_vec(data);
         message.set_more(self.more);
         message.set_routing_id(self.routing_id);
+        if let Some(group) = &self.group {
+            message.set_group(
+                group
+                    .as_c_str()
+                    .to_str()
+                    .map_err(|_| Error::InvalidArgument)?,
+            )?;
+        }
         Ok(message)
     }
 
     fn from_core_message(message: Message) -> Self {
         let more = message.more();
         let routing_id = message.routing_id();
+        let group = message.group().and_then(|group| CString::new(group).ok());
         Self {
             storage: MessageStorage::Owned(message),
             more,
             routing_id,
-            group: None,
+            group,
             metadata: Vec::new(),
         }
     }
@@ -307,9 +316,18 @@ fn unsupported_int(name: &'static str) -> c_int {
     set_error(Error::NotImplemented(name))
 }
 
-fn unsupported_ptr<T>(name: &'static str) -> *mut T {
-    set_errno(Error::NotImplemented(name).errno());
-    ptr::null_mut()
+fn is_bytes_sockopt(option: c_int) -> bool {
+    matches!(
+        option,
+        ZMQ_PLAIN_USERNAME
+            | ZMQ_PLAIN_PASSWORD
+            | ZMQ_CURVE_PUBLICKEY
+            | ZMQ_CURVE_SECRETKEY
+            | ZMQ_CURVE_SERVERKEY
+            | ZMQ_ZAP_DOMAIN
+            | ZMQ_GSSAPI_PRINCIPAL
+            | ZMQ_GSSAPI_SERVICE_PRINCIPAL
+    )
 }
 
 fn write_msg_inner(msg: *mut zmq_msg_t, inner: *mut FfiMessageInner) {
@@ -915,7 +933,7 @@ pub extern "C" fn zmq_setsockopt(
             Err(error) => set_error(error),
         };
     }
-    if option == ZMQ_XPUB_WELCOME_MSG {
+    if is_bytes_sockopt(option) || option == ZMQ_XPUB_WELCOME_MSG {
         if optval.is_null() && optvallen != 0 {
             return set_error(Error::InvalidArgument);
         }
@@ -963,6 +981,27 @@ pub extern "C" fn zmq_getsockopt(
     }
     // SAFETY: `optvallen` is non-null and points to caller-provided storage.
     let available = unsafe { *optvallen };
+    if is_bytes_sockopt(option) {
+        let value = match socket.inner.get_option_bytes(option) {
+            Ok(value) => value,
+            Err(error) => return set_error(error),
+        };
+        if available < value.len() {
+            return set_error(Error::InvalidArgument);
+        }
+        if !value.is_empty() {
+            // SAFETY: `optval` and `optvallen` are non-null; caller supplied enough storage.
+            unsafe {
+                ptr::copy_nonoverlapping(value.as_ptr(), optval.cast::<u8>(), value.len());
+            }
+        }
+        // SAFETY: `optvallen` is non-null and points to caller-provided storage.
+        unsafe {
+            *optvallen = value.len();
+        }
+        clear_errno();
+        return 0;
+    }
     if available < std::mem::size_of::<c_int>() {
         return set_error(Error::InvalidArgument);
     }
@@ -1224,27 +1263,121 @@ pub extern "C" fn zmq_recviov(
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_z85_encode(
-    _dest: *mut c_char,
-    _data: *const u8,
-    _size: usize,
-) -> *mut c_char {
-    unsupported_ptr("zmq_z85_encode")
+pub extern "C" fn zmq_z85_encode(dest: *mut c_char, data: *const u8, size: usize) -> *mut c_char {
+    if dest.is_null() || (data.is_null() && size != 0) {
+        set_errno(EINVAL);
+        return ptr::null_mut();
+    }
+    let bytes = if size == 0 {
+        &[][..]
+    } else {
+        // SAFETY: `data` was checked non-null for non-zero `size` and points to `size` bytes.
+        unsafe { std::slice::from_raw_parts(data, size) }
+    };
+    match libzmq_core::z85_encode(bytes) {
+        Ok(encoded) => {
+            // SAFETY: C ABI requires caller to provide `size * 5 / 4 + 1` writable bytes.
+            unsafe {
+                ptr::copy_nonoverlapping(encoded.as_ptr().cast::<c_char>(), dest, encoded.len());
+                *dest.add(encoded.len()) = 0;
+            }
+            clear_errno();
+            dest
+        }
+        Err(error) => {
+            set_errno(error.errno());
+            ptr::null_mut()
+        }
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_z85_decode(_dest: *mut u8, _string: *const c_char) -> *mut u8 {
-    unsupported_ptr("zmq_z85_decode")
+pub extern "C" fn zmq_z85_decode(dest: *mut u8, string: *const c_char) -> *mut u8 {
+    if dest.is_null() || string.is_null() {
+        set_errno(EINVAL);
+        return ptr::null_mut();
+    }
+    // SAFETY: C ABI requires `string` to point to a valid NUL-terminated Z85 string.
+    let string = unsafe { CStr::from_ptr(string) };
+    let string = match string.to_str() {
+        Ok(string) => string,
+        Err(_) => {
+            set_errno(EINVAL);
+            return ptr::null_mut();
+        }
+    };
+    match libzmq_core::z85_decode(string) {
+        Ok(decoded) => {
+            // SAFETY: C ABI requires caller to provide `strlen(string) * 4 / 5` writable bytes.
+            unsafe {
+                ptr::copy_nonoverlapping(decoded.as_ptr(), dest, decoded.len());
+            }
+            clear_errno();
+            dest
+        }
+        Err(error) => {
+            set_errno(error.errno());
+            ptr::null_mut()
+        }
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_curve_keypair(_public_key: *mut c_char, _secret_key: *mut c_char) -> c_int {
-    unsupported_int("zmq_curve_keypair")
+pub extern "C" fn zmq_curve_keypair(public_key: *mut c_char, secret_key: *mut c_char) -> c_int {
+    if public_key.is_null() || secret_key.is_null() {
+        return set_error(Error::InvalidArgument);
+    }
+    match libzmq_core::curve_keypair() {
+        Ok((public, secret)) => {
+            // SAFETY: C ABI requires caller to provide 41 writable bytes for each key.
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    public.as_ptr().cast::<c_char>(),
+                    public_key,
+                    public.len(),
+                );
+                *public_key.add(public.len()) = 0;
+                ptr::copy_nonoverlapping(
+                    secret.as_ptr().cast::<c_char>(),
+                    secret_key,
+                    secret.len(),
+                );
+                *secret_key.add(secret.len()) = 0;
+            }
+            clear_errno();
+            0
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_curve_public(_public_key: *mut c_char, _secret_key: *const c_char) -> c_int {
-    unsupported_int("zmq_curve_public")
+pub extern "C" fn zmq_curve_public(public_key: *mut c_char, secret_key: *const c_char) -> c_int {
+    if public_key.is_null() || secret_key.is_null() {
+        return set_error(Error::InvalidArgument);
+    }
+    // SAFETY: C ABI requires `secret_key` to point to a valid NUL-terminated 40-byte Z85 string.
+    let secret_key = unsafe { CStr::from_ptr(secret_key) };
+    let secret_key = match secret_key.to_str() {
+        Ok(secret_key) => secret_key,
+        Err(_) => return set_error(Error::InvalidArgument),
+    };
+    match libzmq_core::curve_public(secret_key) {
+        Ok(public) => {
+            // SAFETY: C ABI requires caller to provide 41 writable bytes for the public key.
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    public.as_ptr().cast::<c_char>(),
+                    public_key,
+                    public.len(),
+                );
+                *public_key.add(public.len()) = 0;
+            }
+            clear_errno();
+            0
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
@@ -1605,29 +1738,77 @@ pub extern "C" fn zmq_ctx_get_ext(
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_join(socket: *mut c_void, _group: *const c_char) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
+pub extern "C" fn zmq_join(socket: *mut c_void, group: *const c_char) -> c_int {
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    if group.is_null() {
+        return set_error(Error::InvalidArgument);
     }
-    unsupported_int("zmq_join")
+    // SAFETY: libzmq C ABI requires a valid NUL-terminated group string.
+    let group = match unsafe { CStr::from_ptr(group) }.to_str() {
+        Ok(group) => group,
+        Err(_) => return set_error(Error::InvalidArgument),
+    };
+    match socket.inner.join(group) {
+        Ok(()) => {
+            clear_errno();
+            0
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_leave(socket: *mut c_void, _group: *const c_char) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
+pub extern "C" fn zmq_leave(socket: *mut c_void, group: *const c_char) -> c_int {
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    if group.is_null() {
+        return set_error(Error::InvalidArgument);
     }
-    unsupported_int("zmq_leave")
+    // SAFETY: libzmq C ABI requires a valid NUL-terminated group string.
+    let group = match unsafe { CStr::from_ptr(group) }.to_str() {
+        Ok(group) => group,
+        Err(_) => return set_error(Error::InvalidArgument),
+    };
+    match socket.inner.leave(group) {
+        Ok(()) => {
+            clear_errno();
+            0
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_connect_peer(socket: *mut c_void, _endpoint: *const c_char) -> u32 {
-    if let Err(error) = socket_from_raw(socket) {
-        set_errno(error.errno());
-        return 0;
+pub extern "C" fn zmq_connect_peer(socket: *mut c_void, endpoint: *const c_char) -> u32 {
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => {
+            set_errno(error.errno());
+            return 0;
+        }
+    };
+    let endpoint = match endpoint_from_raw(endpoint) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            set_errno(error.errno());
+            return 0;
+        }
+    };
+    match socket.inner.connect(endpoint) {
+        Ok(()) => {
+            clear_errno();
+            1
+        }
+        Err(error) => {
+            set_errno(error.errno());
+            0
+        }
     }
-    set_errno(ENOTSUP);
-    0
 }
 
 #[no_mangle]

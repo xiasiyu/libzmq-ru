@@ -1,4 +1,6 @@
-pub use libzmq_core::{constants::*, Error, Message, Result, SocketType};
+pub use libzmq_core::{
+    constants::*, curve_keypair, curve_public, Error, Message, Result, SocketType,
+};
 
 pub struct Context {
     inner: libzmq_core::Context,
@@ -55,6 +57,11 @@ impl Socket {
         self.inner.connect(endpoint)
     }
 
+    pub fn connect_peer(&self, endpoint: &str) -> Result<u32> {
+        self.inner.connect(endpoint)?;
+        Ok(1)
+    }
+
     pub fn disconnect(&self, endpoint: &str) -> Result<()> {
         self.inner.disconnect(endpoint)
     }
@@ -65,6 +72,14 @@ impl Socket {
 
     pub fn unsubscribe(&self, prefix: &[u8]) -> Result<()> {
         self.inner.unsubscribe(prefix)
+    }
+
+    pub fn join(&self, group: &str) -> Result<()> {
+        self.inner.join(group)
+    }
+
+    pub fn leave(&self, group: &str) -> Result<()> {
+        self.inner.leave(group)
     }
 
     pub fn send<M>(&self, message: M) -> Result<usize>
@@ -95,6 +110,10 @@ impl Socket {
 
     pub fn get_option_i32(&self, option: i32) -> Result<i32> {
         self.inner.get_option_i32(option)
+    }
+
+    pub fn get_option_bytes(&self, option: i32) -> Result<Vec<u8>> {
+        self.inner.get_option_bytes(option)
     }
 }
 

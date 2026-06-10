@@ -195,11 +195,19 @@ fn inproc_types_compatible(a: SocketType, b: SocketType) -> bool {
             | (SocketType::Router, SocketType::Dealer)
             | (SocketType::Req, SocketType::Rep)
             | (SocketType::Rep, SocketType::Req)
+            | (SocketType::Server, SocketType::Client)
+            | (SocketType::Client, SocketType::Server)
             | (SocketType::Pub, SocketType::Sub)
             | (SocketType::Sub, SocketType::Pub)
             | (SocketType::Xpub, SocketType::Xsub)
             | (SocketType::Xsub, SocketType::Xpub)
             | (SocketType::Stream, SocketType::Stream)
+            | (SocketType::Channel, SocketType::Channel)
+            | (SocketType::Peer, SocketType::Peer)
+            | (SocketType::Radio, SocketType::Dish)
+            | (SocketType::Dish, SocketType::Radio)
+            | (SocketType::Scatter, SocketType::Gather)
+            | (SocketType::Gather, SocketType::Scatter)
     )
 }
 
@@ -208,13 +216,18 @@ fn socket_type_accepts_message(
     subscriptions: &SubscriptionSet,
     message: &Message,
 ) -> Result<bool> {
-    if !matches!(socket_type, SocketType::Sub | SocketType::Xsub) {
-        return Ok(true);
-    }
     let subscriptions = subscriptions.lock().map_err(|_| Error::InvalidSocket)?;
-    Ok(subscriptions
-        .iter()
-        .any(|prefix| message.data().starts_with(prefix)))
+    match socket_type {
+        SocketType::Sub | SocketType::Xsub => Ok(subscriptions
+            .iter()
+            .any(|prefix| message.data().starts_with(prefix))),
+        SocketType::Dish => Ok(message.group().is_some_and(|group| {
+            subscriptions
+                .iter()
+                .any(|stored| stored == group.as_bytes())
+        })),
+        _ => Ok(true),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -327,6 +340,10 @@ impl Context {
 }
 
 impl ContextShared {
+    pub(crate) fn next_transient_socket_id(&self) -> usize {
+        self.next_socket_id.fetch_add(1, Ordering::SeqCst)
+    }
+
     pub(crate) fn bind_inproc(
         &self,
         endpoint: &str,

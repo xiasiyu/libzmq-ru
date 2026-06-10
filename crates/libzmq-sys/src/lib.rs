@@ -22,7 +22,9 @@ pub mod platform {
 
 use std::io;
 use std::io::{Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 pub const POLLIN: i16 = 0x001;
@@ -49,6 +51,11 @@ pub struct TcpListenerHandle {
 #[derive(Debug)]
 pub struct TcpStreamHandle {
     stream: TcpStream,
+}
+
+#[derive(Debug)]
+pub struct UdpSocketHandle {
+    socket: UdpSocket,
 }
 
 impl SockAddr {
@@ -128,6 +135,97 @@ impl TcpStreamHandle {
 
     pub fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         self.stream.read(bytes)
+    }
+}
+
+impl Read for TcpStreamHandle {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.stream.read(buf)
+    }
+}
+
+impl Write for TcpStreamHandle {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+impl UdpSocketHandle {
+    pub fn bind(addr: impl ToSocketAddrs) -> io::Result<Self> {
+        Ok(Self {
+            socket: UdpSocket::bind(addr)?,
+        })
+    }
+
+    pub fn connect(&self, addr: impl ToSocketAddrs) -> io::Result<()> {
+        self.socket.connect(addr)
+    }
+
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        self.socket.set_nonblocking(nonblocking)
+    }
+
+    pub fn join_multicast_v4(&self, group: Ipv4Addr, interface: Ipv4Addr) -> io::Result<()> {
+        self.socket.join_multicast_v4(&group, &interface)
+    }
+
+    pub fn set_multicast_loop_v4(&self, enabled: bool) -> io::Result<()> {
+        self.socket.set_multicast_loop_v4(enabled)
+    }
+
+    pub fn set_multicast_ttl_v4(&self, ttl: u32) -> io::Result<()> {
+        self.socket.set_multicast_ttl_v4(ttl)
+    }
+
+    #[cfg(unix)]
+    pub fn set_multicast_if_v4(&self, interface: Ipv4Addr) -> io::Result<()> {
+        let addr = libc::in_addr {
+            s_addr: u32::from_ne_bytes(interface.octets()),
+        };
+        // SAFETY: `self.socket.as_raw_fd()` is a valid UDP socket fd, and `addr` points to a
+        // properly initialized `in_addr` for the duration of the call.
+        let rc = unsafe {
+            libc::setsockopt(
+                self.socket.as_raw_fd(),
+                libc::IPPROTO_IP,
+                libc::IP_MULTICAST_IF,
+                (&addr as *const libc::in_addr).cast(),
+                std::mem::size_of::<libc::in_addr>() as libc::socklen_t,
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn set_multicast_if_v4(&self, _interface: Ipv4Addr) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "setting IPv4 multicast interface is not implemented on Windows",
+        ))
+    }
+
+    pub fn send(&self, bytes: &[u8]) -> io::Result<usize> {
+        self.socket.send(bytes)
+    }
+
+    pub fn send_to(&self, bytes: &[u8], addr: SocketAddr) -> io::Result<usize> {
+        self.socket.send_to(bytes, addr)
+    }
+
+    pub fn recv_from(&self, bytes: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        self.socket.recv_from(bytes)
     }
 }
 
@@ -816,6 +914,23 @@ mod tests {
         client.read_exact(&mut bytes).unwrap();
         assert_eq!(&bytes, b"pong");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn udp_sockets_exchange_datagrams() {
+        let server = UdpSocketHandle::bind("127.0.0.1:0").unwrap();
+        let client = UdpSocketHandle::bind("127.0.0.1:0").unwrap();
+        let server_addr = server.local_addr().unwrap();
+        client.connect(server_addr).unwrap();
+
+        assert_eq!(client.send(b"ping").unwrap(), 4);
+        let mut bytes = [0u8; 8];
+        let (size, peer) = server.recv_from(&mut bytes).unwrap();
+        assert_eq!(&bytes[..size], b"ping");
+
+        assert_eq!(server.send_to(b"pong", peer).unwrap(), 4);
+        let (size, _) = client.recv_from(&mut bytes).unwrap();
+        assert_eq!(&bytes[..size], b"pong");
     }
 
     #[cfg(unix)]

@@ -345,55 +345,57 @@ Completion checks:
 
 Status note: Phase 9 completed with TCP/IPC endpoint parsing, TCP listener/connecter wrappers, Unix IPC listener/connecter wrappers, TCP reconnect/backoff retries, ZMTP NULL greeting encode/decode, ZMTP v1/v2/v3 frame encode/decode, ZMTP v3.1 READY metadata encode/decode, raw STREAM-over-TCP bytes, ordinary TCP wire-level greeting exchange, and socket-level PAIR TCP/IPC, PUSH/PULL TCP, and REQ/REP TCP round trips through native and C ABI entry points. Process-isolated and same-process original-C++ TCP interop now pass in both directions after fixing greeting signature bytes, accepted stream blocking mode, and the greeting exchange order.
 
-## Phase 10: Security [ ]
+## Phase 10: Security [~]
 
 Goal: support original security mechanisms.
 
-- [ ] Implement NULL mechanism.
-- [ ] Implement ZAP client flow.
-- [ ] Implement ZAP request encoding.
-- [ ] Implement ZAP reply parsing.
-- [ ] Implement PLAIN client.
-- [ ] Implement PLAIN server.
-- [ ] Implement CURVE client.
-- [ ] Implement CURVE server.
-- [ ] Implement CURVE keypair utility.
-- [ ] Implement CURVE public key derivation.
-- [ ] Implement Z85 encode.
-- [ ] Implement Z85 decode.
-- [ ] Implement GSSAPI client.
-- [ ] Implement GSSAPI server.
-- [ ] Ensure secrets use zeroization.
-- [ ] Add security interop tests.
+- [x] Implement NULL mechanism.
+- [x] Implement ZAP client flow.
+- [x] Implement ZAP request encoding.
+- [x] Implement ZAP reply parsing.
+- [x] Implement PLAIN client.
+- [x] Implement PLAIN server.
+- [x] Implement CURVE client.
+- [x] Implement CURVE server.
+- [x] Implement CURVE keypair utility.
+- [x] Implement CURVE public key derivation.
+- [x] Implement Z85 encode.
+- [x] Implement Z85 decode.
+- [~] Implement GSSAPI client.
+- [~] Implement GSSAPI server.
+- [x] Ensure secrets use zeroization.
+- [~] Add security interop tests.
 
 Completion checks:
 
-- [ ] `cargo fmt --all`
-- [ ] `cargo test --workspace`
-- [ ] `cargo test --workspace --features curve,gssapi`
-- [ ] NULL security tests pass.
-- [ ] PLAIN security tests pass.
-- [ ] ZAP tests pass.
-- [ ] CURVE tests pass.
-- [ ] GSSAPI tests pass where platform support exists.
-- [ ] C++ and Rust secure interop passes.
+- [x] `cargo fmt --all`
+- [x] `cargo test --workspace --all-features`
+- [x] `cargo test -p libzmq-ffi --features curve,gssapi`
+- [x] NULL security tests pass.
+- [x] PLAIN security tests pass.
+- [x] ZAP tests pass.
+- [x] CURVE tests pass.
+- [x] GSSAPI tests pass where platform support exists.
+- [~] C++ and Rust secure interop passes.
 
-## Phase 11: Draft Sockets and Extended Transports [ ]
+Status note: Phase 10 is in progress. NULL greeting behavior is used by the ZMTP transport. Z85 encode/decode, CURVE keypair generation, CURVE public-key derivation, ZAP request encoding, ZAP reply parsing, security socket option round-trips for PLAIN/CURVE/ZAP/GSSAPI-related options, PLAIN HELLO/WELCOME/INITIATE command handshakes, local PLAIN credential accept/reject behavior, external ZAP actor accept/deny flow for Rust-native and C ABI TCP PAIR, original-C++ PLAIN interop in both directions, NaCl-compatible CURVE HELLO/WELCOME/INITIATE/READY and encrypted MESSAGE body paths for Rust-native and C ABI TCP PAIR, original-C++ CURVE interop in both directions with CURVE-capable and secure oracle builds, CURVE local client-key reject behavior, CURVE ZAP actor accept behavior with raw 32-byte RFC 27 credentials, baseline GSSAPI command/auth/ZAP paths for Rust-native and C ABI TCP PAIR, original-style GSSAPI INITIATE/READY framing for the local placeholder, and zeroization of stored security material are implemented and tested. Original-C++ oracle builds are available at `../libzmq/build-ru-oracle-curve/lib/libzmq.dylib` and `../libzmq/build-ru-oracle-secure/lib/libzmq.dylib`; the secure oracle passes the existing NULL/PLAIN/CURVE interop checks. Remaining work: true platform Kerberos/GSSAPI token exchange using `gss_init_sec_context`/`gss_accept_sec_context`, GSSAPI READY/MESSAGE wrap/unwrap semantics when plaintext is disabled, and original-C++ GSSAPI interop validation with configured Kerberos keytab/credential cache.
+
+## Phase 11: Draft Sockets and Extended Transports [~]
 
 Goal: satisfy full confirmed feature scope.
 
-- [ ] Implement SERVER.
-- [ ] Implement CLIENT.
-- [ ] Implement RADIO.
-- [ ] Implement DISH.
-- [ ] Implement GATHER.
-- [ ] Implement SCATTER.
-- [ ] Implement DGRAM.
-- [ ] Implement PEER.
-- [ ] Implement CHANNEL.
-- [ ] Implement UDP unicast and multicast.
-- [ ] Implement WS transport.
-- [ ] Implement WSS transport.
+- [x] Implement SERVER.
+- [x] Implement CLIENT.
+- [x] Implement RADIO.
+- [x] Implement DISH.
+- [x] Implement GATHER.
+- [x] Implement SCATTER.
+- [x] Implement DGRAM.
+- [x] Implement PEER.
+- [x] Implement CHANNEL.
+- [x] Implement UDP unicast and multicast.
+- [x] Implement WS transport.
+- [x] Implement WSS transport.
 - [ ] Implement OpenPGM FFI.
 - [ ] Implement PGM and EPGM transport.
 - [ ] Implement NORM FFI and transport.
@@ -403,17 +405,19 @@ Goal: satisfy full confirmed feature scope.
 
 Completion checks:
 
-- [ ] `cargo fmt --all`
-- [ ] `cargo test --workspace --all-features`
-- [ ] Draft socket tests pass.
-- [ ] UDP tests pass.
-- [ ] WS tests pass.
-- [ ] WSS tests pass.
+- [x] `cargo fmt --all`
+- [x] `cargo test --workspace --all-features`
+- [~] Draft socket tests pass.
+- [x] UDP tests pass.
+- [x] WS tests pass.
+- [x] WSS tests pass.
 - [ ] PGM tests pass where dependency exists.
 - [ ] NORM tests pass where dependency exists.
 - [ ] TIPC tests pass where platform support exists.
 - [ ] VMCI tests pass where platform support exists.
 - [ ] VSOCK tests pass where platform support exists.
+
+Status note: Phase 11 is in progress. Draft `SERVER`/`CLIENT` now work as one-to-one messaging over TCP and as routing-id-addressed messaging over inproc. Draft `PEER` now works as one-to-one messaging over TCP, routing-id-addressed messaging over inproc, and exposes `connect_peer` in the Rust API plus `zmq_connect_peer` in the C ABI. Draft `CHANNEL` now works as bidirectional one-to-one messaging over inproc/TCP/IPC using the existing ZMTP frame path. Draft `SCATTER`/`GATHER` now work as load-balanced unidirectional messaging over inproc/TCP/IPC, including wrong-direction error behavior. Draft `RADIO`/`DISH` now work over inproc with exact message-group filtering, `join`/`leave` in the Rust API, `zmq_join`/`zmq_leave` in the C ABI, and C ABI preservation of message groups through `zmq_msg_send`/`zmq_msg_recv`. Draft `DGRAM` now works over UDP unicast and IPv4 multicast using a sys-layer `UdpSocketHandle`; bound sockets reply to the last datagram peer, connected sockets use connected UDP sends, multicast receivers join `239.x.x.x` groups on loopback for local delivery, and native/C ABI tests cover unicast and multicast round trips. `ws://` transport now works with a minimal HTTP WebSocket upgrade handshake and binary WebSocket frames carrying ZMTP v3 frames; native/C ABI PAIR tests cover WS round trips. `wss://` transport now works behind the explicit `wss` feature using rustls over the WebSocket frame path with a local self-signed certificate; native/C ABI PAIR tests cover WSS under `--all-features`. WSS TLS dependencies remain feature-gated so the default Linux cross-target workspace check passes without a Linux C cross-compiler; enabling `wss` for a non-host target still requires the C toolchain needed by rustls crypto providers. Native Rust and C ABI tests cover inproc and TCP round trips, UDP `DGRAM` round trips, WS/WSS PAIR round trips, inproc `SERVER`/`CLIENT` and `PEER` routing ids, inproc `SCATTER` load balancing, and `RADIO`/`DISH` group filtering. Remaining optional transports PGM/EPGM, NORM, TIPC, VMCI, and VSOCK now have explicit `NotSupported`/`ENOTSUP` regression coverage rather than accidental fallthrough; OpenPGM and NORM development packages are not available through `pkg-config` in this environment, and TIPC/VMCI/VSOCK require platform-specific kernel/socket support before real transport tests can be enabled.
 
 ## Phase 12: Performance Gate [ ]
 

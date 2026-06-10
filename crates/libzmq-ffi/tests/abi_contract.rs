@@ -1,13 +1,14 @@
 use std::ffi::CStr;
 use std::ffi::{c_char, c_int, c_void};
 use std::mem::{align_of, size_of, MaybeUninit};
-use std::net::TcpListener;
+use std::net::{TcpListener, UdpSocket};
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use zmq::*;
 
 const ZMQ_HAUSNUMERO: c_int = 156_384_712;
+const ENOTSUP: c_int = ZMQ_HAUSNUMERO + 1;
 const ENOTSOCK: c_int = ZMQ_HAUSNUMERO + 9;
 const EHOSTUNREACH: c_int = ZMQ_HAUSNUMERO + 17;
 const EFSM: c_int = ZMQ_HAUSNUMERO + 51;
@@ -25,6 +26,15 @@ const ZMQ_PULL: c_int = 7;
 const ZMQ_PUSH: c_int = 8;
 const ZMQ_XPUB: c_int = 9;
 const ZMQ_XSUB: c_int = 10;
+const ZMQ_SERVER: c_int = 12;
+const ZMQ_CLIENT: c_int = 13;
+const ZMQ_RADIO: c_int = 14;
+const ZMQ_DISH: c_int = 15;
+const ZMQ_GATHER: c_int = 16;
+const ZMQ_SCATTER: c_int = 17;
+const ZMQ_DGRAM: c_int = 18;
+const ZMQ_PEER: c_int = 19;
+const ZMQ_CHANNEL: c_int = 20;
 const ZMQ_SNDMORE: c_int = 2;
 const ZMQ_MORE: c_int = 1;
 const ZMQ_RCVMORE: c_int = 13;
@@ -37,13 +47,29 @@ const ZMQ_LINGER: c_int = 17;
 const ZMQ_SNDHWM: c_int = 23;
 const ZMQ_RCVHWM: c_int = 24;
 const ZMQ_ROUTER_MANDATORY: c_int = 33;
+const ZMQ_MECHANISM: c_int = 43;
+const ZMQ_PLAIN_SERVER: c_int = 44;
+const ZMQ_PLAIN_USERNAME: c_int = 45;
+const ZMQ_PLAIN_PASSWORD: c_int = 46;
+const ZMQ_CURVE_SERVER: c_int = 47;
+const ZMQ_CURVE_PUBLICKEY: c_int = 48;
+const ZMQ_CURVE_SECRETKEY: c_int = 49;
+const ZMQ_CURVE_SERVERKEY: c_int = 50;
 const ZMQ_REQ_RELAXED: c_int = 53;
 const ZMQ_CONFLATE: c_int = 54;
+const ZMQ_ZAP_DOMAIN: c_int = 55;
+const ZMQ_GSSAPI_SERVER: c_int = 62;
+const ZMQ_GSSAPI_PRINCIPAL: c_int = 63;
+const ZMQ_GSSAPI_SERVICE_PRINCIPAL: c_int = 64;
 const ZMQ_SUBSCRIBE: c_int = 6;
 const ZMQ_XPUB_WELCOME_MSG: c_int = 72;
 const ZMQ_POLLIN: i16 = 1;
 const ZMQ_POLLOUT: i16 = 2;
 const ZMQ_EVENT_LISTENING: c_int = 0x0008;
+const ZMQ_NULL: c_int = 0;
+const ZMQ_PLAIN: c_int = 1;
+const ZMQ_CURVE: c_int = 2;
+const ZMQ_GSSAPI: c_int = 3;
 
 static FREE_CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
 static TIMER_CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -255,6 +281,21 @@ fn unimplemented_socket_operations_return_explicit_error() {
     assert_eq!(zmq_send(socket, ptr::null(), 0, 0), -1);
     assert_eq!(zmq_errno(), EAGAIN);
 
+    for endpoint in [
+        "pgm://127.0.0.1:1",
+        "epgm://127.0.0.1:1",
+        "norm://127.0.0.1:1",
+        "tipc://{5560,0,0}",
+        "vmci://1:1",
+        "vsock://2:1",
+    ] {
+        let endpoint = std::ffi::CString::new(endpoint).unwrap();
+        assert_eq!(zmq_bind(socket, endpoint.as_ptr()), -1);
+        assert_eq!(zmq_errno(), ENOTSUP);
+        assert_eq!(zmq_connect(socket, endpoint.as_ptr()), -1);
+        assert_eq!(zmq_errno(), ENOTSUP);
+    }
+
     assert_eq!(zmq_close(socket), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
@@ -336,6 +377,903 @@ fn pair_tcp_round_trip_over_c_abi() {
     assert_eq!(zmq_close(client), 0);
     assert_eq!(zmq_close(server), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn pair_ws_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+
+    let endpoint =
+        std::ffi::CString::new(format!("ws://127.0.0.1:{}/zmq", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    assert_eq!(zmq_send(client, b"hello".as_ptr().cast(), 5, 0), 5);
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(server, &mut buffer), 5);
+    assert_eq!(&buffer[..5], b"hello");
+
+    assert_eq!(zmq_send(server, b"world".as_ptr().cast(), 5, 0), 5);
+    assert_eq!(recv_retry(client, &mut buffer), 5);
+    assert_eq!(&buffer[..5], b"world");
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+#[cfg(feature = "wss")]
+fn pair_wss_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+
+    let endpoint =
+        std::ffi::CString::new(format!("wss://127.0.0.1:{}/zmq", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    let client_value = client as usize;
+    let client_thread = std::thread::spawn(move || {
+        let client = client_value as *mut c_void;
+        let send_rc = zmq_send(client, b"hello".as_ptr().cast(), 5, 0);
+        let mut buffer = [0u8; 16];
+        let recv_rc = recv_retry(client, &mut buffer);
+        (send_rc, recv_rc, buffer)
+    });
+
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(server, &mut buffer), 5);
+    assert_eq!(&buffer[..5], b"hello");
+    assert_eq!(zmq_send(server, b"world".as_ptr().cast(), 5, 0), 5);
+
+    let (send_rc, recv_rc, buffer) = client_thread.join().unwrap();
+    assert_eq!(send_rc, 5);
+    assert_eq!(recv_rc, 5);
+    assert_eq!(&buffer[..5], b"world");
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn dgram_udp_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_DGRAM);
+    let client = zmq_socket(ctx, ZMQ_DGRAM);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+
+    let endpoint =
+        std::ffi::CString::new(format!("udp://127.0.0.1:{}", unused_udp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    assert_eq!(zmq_send(client, b"ping".as_ptr().cast(), 4, 0), 4);
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(server, &mut buffer), 4);
+    assert_eq!(&buffer[..4], b"ping");
+
+    assert_eq!(zmq_send(server, b"pong".as_ptr().cast(), 4, 0), 4);
+    assert_eq!(recv_retry(client, &mut buffer), 4);
+    assert_eq!(&buffer[..4], b"pong");
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn dgram_udp_multicast_receives_group_datagram_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let receiver = zmq_socket(ctx, ZMQ_DGRAM);
+    let sender = zmq_socket(ctx, ZMQ_DGRAM);
+    assert!(!receiver.is_null());
+    assert!(!sender.is_null());
+
+    let endpoint =
+        std::ffi::CString::new(format!("udp://239.255.0.2:{}", unused_udp_port())).unwrap();
+    assert_eq!(zmq_bind(receiver, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(sender, endpoint.as_ptr()), 0);
+
+    assert_eq!(zmq_send(sender, b"mcast".as_ptr().cast(), 5, 0), 5);
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(receiver, &mut buffer), 5);
+    assert_eq!(&buffer[..5], b"mcast");
+
+    assert_eq!(zmq_close(sender), 0);
+    assert_eq!(zmq_close(receiver), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn server_client_tcp_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_SERVER);
+    let client = zmq_socket(ctx, ZMQ_CLIENT);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    assert_eq!(zmq_send(client, b"hello".as_ptr().cast(), 5, 0), 5);
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(server, &mut buffer), 5);
+    assert_eq!(&buffer[..5], b"hello");
+
+    assert_eq!(zmq_send(server, b"world".as_ptr().cast(), 5, 0), 5);
+    assert_eq!(recv_retry(client, &mut buffer), 5);
+    assert_eq!(&buffer[..5], b"world");
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn peer_tcp_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_PEER);
+    let client = zmq_socket(ctx, ZMQ_PEER);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_ne!(zmq_connect_peer(client, endpoint.as_ptr()), 0);
+
+    assert_eq!(zmq_send(client, b"hello".as_ptr().cast(), 5, 0), 5);
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(server, &mut buffer), 5);
+    assert_eq!(&buffer[..5], b"hello");
+
+    assert_eq!(zmq_send(server, b"world".as_ptr().cast(), 5, 0), 5);
+    assert_eq!(recv_retry(client, &mut buffer), 5);
+    assert_eq!(&buffer[..5], b"world");
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn channel_tcp_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_CHANNEL);
+    let client = zmq_socket(ctx, ZMQ_CHANNEL);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    assert_eq!(zmq_send(client, b"hello".as_ptr().cast(), 5, 0), 5);
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(server, &mut buffer), 5);
+    assert_eq!(&buffer[..5], b"hello");
+
+    assert_eq!(zmq_send(server, b"world".as_ptr().cast(), 5, 0), 5);
+    assert_eq!(recv_retry(client, &mut buffer), 5);
+    assert_eq!(&buffer[..5], b"world");
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn scatter_gather_tcp_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let gather = zmq_socket(ctx, ZMQ_GATHER);
+    let scatter = zmq_socket(ctx, ZMQ_SCATTER);
+    assert!(!gather.is_null());
+    assert!(!scatter.is_null());
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(gather, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(scatter, endpoint.as_ptr()), 0);
+
+    assert_eq!(zmq_send(scatter, b"job".as_ptr().cast(), 3, 0), 3);
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(gather, &mut buffer), 3);
+    assert_eq!(&buffer[..3], b"job");
+
+    assert_eq!(zmq_close(scatter), 0);
+    assert_eq!(zmq_close(gather), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn pair_tcp_plain_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+
+    let enabled = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            server,
+            ZMQ_PLAIN_SERVER,
+            (&enabled as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(client, ZMQ_PLAIN_USERNAME, b"user".as_ptr().cast(), 4),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(client, ZMQ_PLAIN_PASSWORD, b"pass".as_ptr().cast(), 4),
+        0
+    );
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    let client_value = client as usize;
+    let sender = std::thread::spawn(move || {
+        let client = client_value as *mut c_void;
+        zmq_send(client, b"hello".as_ptr().cast(), 5, 0)
+    });
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(server, &mut buffer), 5);
+    assert_eq!(&buffer[..5], b"hello");
+    assert_eq!(sender.join().unwrap(), 5);
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn pair_tcp_plain_rejects_bad_credentials_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+
+    let enabled = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            server,
+            ZMQ_PLAIN_SERVER,
+            (&enabled as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(server, ZMQ_PLAIN_USERNAME, b"expected".as_ptr().cast(), 8),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(server, ZMQ_PLAIN_PASSWORD, b"secret".as_ptr().cast(), 6),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(client, ZMQ_PLAIN_USERNAME, b"wrong".as_ptr().cast(), 5),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(client, ZMQ_PLAIN_PASSWORD, b"secret".as_ptr().cast(), 6),
+        0
+    );
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    let client_value = client as usize;
+    let sender = std::thread::spawn(move || {
+        let client = client_value as *mut c_void;
+        zmq_send(client, b"hello".as_ptr().cast(), 5, 0)
+    });
+    assert_eq!(recv_retry_errno(server), EINVAL);
+    assert_eq!(sender.join().unwrap(), -1);
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn pair_tcp_plain_uses_zap_actor_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let zap = zmq_socket(ctx, ZMQ_REP);
+    assert!(!zap.is_null());
+    let zap_endpoint = std::ffi::CString::new("inproc://zeromq.zap.01").unwrap();
+    assert_eq!(zmq_bind(zap, zap_endpoint.as_ptr()), 0);
+    let zap_thread = spawn_plain_zap_actor_c(zap, true);
+
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+    configure_plain_pair(server, client);
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    let client_value = client as usize;
+    let sender = std::thread::spawn(move || {
+        let client = client_value as *mut c_void;
+        zmq_send(client, b"hello".as_ptr().cast(), 5, 0)
+    });
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(server, &mut buffer), 5);
+    assert_eq!(&buffer[..5], b"hello");
+    assert_eq!(sender.join().unwrap(), 5);
+    zap_thread.join().unwrap();
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_close(zap), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn pair_tcp_plain_rejects_zap_denial_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let zap = zmq_socket(ctx, ZMQ_REP);
+    assert!(!zap.is_null());
+    let zap_endpoint = std::ffi::CString::new("inproc://zeromq.zap.01").unwrap();
+    assert_eq!(zmq_bind(zap, zap_endpoint.as_ptr()), 0);
+    let zap_thread = spawn_plain_zap_actor_c(zap, false);
+
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+    configure_plain_pair(server, client);
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    let client_value = client as usize;
+    let sender = std::thread::spawn(move || {
+        let client = client_value as *mut c_void;
+        zmq_send(client, b"hello".as_ptr().cast(), 5, 0)
+    });
+    let mut buffer = [0u8; 16];
+    assert_eq!(
+        zmq_recv(server, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+    assert_eq!(sender.join().unwrap(), -1);
+    zap_thread.join().unwrap();
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_close(zap), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn pair_tcp_curve_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+    configure_curve_pair(server, client, false);
+
+    let mut mechanism = 0;
+    let mut mechanism_size = size_of::<c_int>();
+    assert_eq!(
+        zmq_getsockopt(
+            server,
+            ZMQ_MECHANISM,
+            (&mut mechanism as *mut c_int).cast(),
+            &mut mechanism_size
+        ),
+        0
+    );
+    assert_eq!(mechanism, ZMQ_CURVE);
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    let client_value = client as usize;
+    let sender = std::thread::spawn(move || {
+        let client = client_value as *mut c_void;
+        zmq_send(client, b"curve".as_ptr().cast(), 5, 0)
+    });
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(server, &mut buffer), 5);
+    assert_eq!(&buffer[..5], b"curve");
+    assert_eq!(sender.join().unwrap(), 5);
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn pair_tcp_curve_uses_zap_actor_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let zap = zmq_socket(ctx, ZMQ_REP);
+    assert!(!zap.is_null());
+    let zap_endpoint = std::ffi::CString::new("inproc://zeromq.zap.01").unwrap();
+    assert_eq!(zmq_bind(zap, zap_endpoint.as_ptr()), 0);
+    let zap_thread = spawn_curve_zap_actor_c(zap, true);
+
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+    configure_curve_pair(server, client, true);
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    let client_value = client as usize;
+    let sender = std::thread::spawn(move || {
+        let client = client_value as *mut c_void;
+        zmq_send(client, b"curve".as_ptr().cast(), 5, 0)
+    });
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(server, &mut buffer), 5);
+    assert_eq!(&buffer[..5], b"curve");
+    assert_eq!(sender.join().unwrap(), 5);
+    zap_thread.join().unwrap();
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_close(zap), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn pair_tcp_gssapi_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+    configure_gssapi_pair(server, client, b"client@EXAMPLE", b"client@EXAMPLE");
+
+    let mut mechanism = 0;
+    let mut mechanism_size = size_of::<c_int>();
+    assert_eq!(
+        zmq_getsockopt(
+            server,
+            ZMQ_MECHANISM,
+            (&mut mechanism as *mut c_int).cast(),
+            &mut mechanism_size
+        ),
+        0
+    );
+    assert_eq!(mechanism, ZMQ_GSSAPI);
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    let client_value = client as usize;
+    let sender = std::thread::spawn(move || {
+        let client = client_value as *mut c_void;
+        zmq_send(client, b"gss".as_ptr().cast(), 3, 0)
+    });
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(server, &mut buffer), 3);
+    assert_eq!(&buffer[..3], b"gss");
+    assert_eq!(sender.join().unwrap(), 3);
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn pair_tcp_gssapi_rejects_bad_principal_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+    configure_gssapi_pair(server, client, b"expected@EXAMPLE", b"wrong@EXAMPLE");
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    let client_value = client as usize;
+    let sender = std::thread::spawn(move || {
+        let client = client_value as *mut c_void;
+        zmq_send(client, b"gss".as_ptr().cast(), 3, 0)
+    });
+    let mut buffer = [0u8; 16];
+    assert_eq!(
+        zmq_recv(server, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+    assert_eq!(sender.join().unwrap(), -1);
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn pair_tcp_gssapi_uses_zap_actor_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let zap = zmq_socket(ctx, ZMQ_REP);
+    assert!(!zap.is_null());
+    let zap_endpoint = std::ffi::CString::new("inproc://zeromq.zap.01").unwrap();
+    assert_eq!(zmq_bind(zap, zap_endpoint.as_ptr()), 0);
+    let zap_thread = spawn_gssapi_zap_actor_c(zap, true);
+
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+    configure_gssapi_pair(server, client, b"", b"client@EXAMPLE");
+    assert_eq!(
+        zmq_setsockopt(server, ZMQ_ZAP_DOMAIN, b"domain".as_ptr().cast(), 6),
+        0
+    );
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    let client_value = client as usize;
+    let sender = std::thread::spawn(move || {
+        let client = client_value as *mut c_void;
+        zmq_send(client, b"gss".as_ptr().cast(), 3, 0)
+    });
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(server, &mut buffer), 3);
+    assert_eq!(&buffer[..3], b"gss");
+    assert_eq!(sender.join().unwrap(), 3);
+    zap_thread.join().unwrap();
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_close(zap), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+fn configure_gssapi_pair(server: *mut c_void, client: *mut c_void, expected: &[u8], actual: &[u8]) {
+    let enabled = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            server,
+            ZMQ_GSSAPI_SERVER,
+            (&enabled as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(
+            server,
+            ZMQ_GSSAPI_PRINCIPAL,
+            expected.as_ptr().cast(),
+            expected.len()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(
+            client,
+            ZMQ_GSSAPI_PRINCIPAL,
+            actual.as_ptr().cast(),
+            actual.len()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(
+            client,
+            ZMQ_GSSAPI_SERVICE_PRINCIPAL,
+            b"server@EXAMPLE".as_ptr().cast(),
+            14
+        ),
+        0
+    );
+}
+
+fn configure_curve_pair(server: *mut c_void, client: *mut c_void, zap_domain: bool) {
+    let mut server_public = [0 as c_char; 41];
+    let mut server_secret = [0 as c_char; 41];
+    let mut client_public = [0 as c_char; 41];
+    let mut client_secret = [0 as c_char; 41];
+    assert_eq!(
+        zmq_curve_keypair(server_public.as_mut_ptr(), server_secret.as_mut_ptr()),
+        0
+    );
+    assert_eq!(
+        zmq_curve_keypair(client_public.as_mut_ptr(), client_secret.as_mut_ptr()),
+        0
+    );
+    let enabled = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            server,
+            ZMQ_CURVE_SERVER,
+            (&enabled as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(
+            server,
+            ZMQ_CURVE_SECRETKEY,
+            server_secret.as_ptr().cast(),
+            40
+        ),
+        0
+    );
+    if zap_domain {
+        assert_eq!(
+            zmq_setsockopt(server, ZMQ_ZAP_DOMAIN, b"domain".as_ptr().cast(), 6),
+            0
+        );
+    } else {
+        assert_eq!(
+            zmq_setsockopt(
+                server,
+                ZMQ_CURVE_PUBLICKEY,
+                client_public.as_ptr().cast(),
+                40
+            ),
+            0
+        );
+    }
+    assert_eq!(
+        zmq_setsockopt(
+            client,
+            ZMQ_CURVE_SERVERKEY,
+            server_public.as_ptr().cast(),
+            40
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(
+            client,
+            ZMQ_CURVE_PUBLICKEY,
+            client_public.as_ptr().cast(),
+            40
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(
+            client,
+            ZMQ_CURVE_SECRETKEY,
+            client_secret.as_ptr().cast(),
+            40
+        ),
+        0
+    );
+}
+
+fn spawn_curve_zap_actor_c(zap: *mut c_void, accept: bool) -> std::thread::JoinHandle<()> {
+    let zap_value = zap as usize;
+    std::thread::spawn(move || {
+        let zap = zap_value as *mut c_void;
+        let frames = recv_multipart_c(zap);
+        assert_eq!(frames[0], b"1.0");
+        assert_eq!(frames[2], b"domain");
+        assert_eq!(frames[5], b"CURVE");
+        assert_eq!(frames[6].len(), 32);
+        let status = if accept {
+            b"200".as_slice()
+        } else {
+            b"400".as_slice()
+        };
+        let text = if accept {
+            b"OK".as_slice()
+        } else {
+            b"DENIED".as_slice()
+        };
+        let reply = [
+            b"1.0".as_slice(),
+            frames[1].as_slice(),
+            status,
+            text,
+            b"user".as_slice(),
+            b"".as_slice(),
+        ];
+        for (index, frame) in reply.iter().enumerate() {
+            let flags = if index + 1 == reply.len() {
+                0
+            } else {
+                ZMQ_SNDMORE
+            };
+            assert_eq!(
+                zmq_send(zap, frame.as_ptr().cast(), frame.len(), flags),
+                frame.len() as c_int
+            );
+        }
+    })
+}
+
+fn spawn_gssapi_zap_actor_c(zap: *mut c_void, accept: bool) -> std::thread::JoinHandle<()> {
+    let zap_value = zap as usize;
+    std::thread::spawn(move || {
+        let zap = zap_value as *mut c_void;
+        let frames = recv_multipart_c(zap);
+        assert_eq!(frames[0], b"1.0");
+        assert_eq!(frames[2], b"domain");
+        assert_eq!(frames[5], b"GSSAPI");
+        assert_eq!(frames[6], b"client@EXAMPLE");
+        let status = if accept {
+            b"200".as_slice()
+        } else {
+            b"400".as_slice()
+        };
+        let text = if accept {
+            b"OK".as_slice()
+        } else {
+            b"DENIED".as_slice()
+        };
+        let reply = [
+            b"1.0".as_slice(),
+            frames[1].as_slice(),
+            status,
+            text,
+            b"user".as_slice(),
+            b"".as_slice(),
+        ];
+        for (index, frame) in reply.iter().enumerate() {
+            let flags = if index + 1 == reply.len() {
+                0
+            } else {
+                ZMQ_SNDMORE
+            };
+            assert_eq!(
+                zmq_send(zap, frame.as_ptr().cast(), frame.len(), flags),
+                frame.len() as c_int
+            );
+        }
+    })
+}
+
+fn configure_plain_pair(server: *mut c_void, client: *mut c_void) {
+    let enabled = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            server,
+            ZMQ_PLAIN_SERVER,
+            (&enabled as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(server, ZMQ_ZAP_DOMAIN, b"domain".as_ptr().cast(), 6),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(client, ZMQ_PLAIN_USERNAME, b"user".as_ptr().cast(), 4),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(client, ZMQ_PLAIN_PASSWORD, b"pass".as_ptr().cast(), 4),
+        0
+    );
+}
+
+fn spawn_plain_zap_actor_c(zap: *mut c_void, accept: bool) -> std::thread::JoinHandle<()> {
+    let zap_value = zap as usize;
+    std::thread::spawn(move || {
+        let zap = zap_value as *mut c_void;
+        let frames = recv_multipart_c(zap);
+        assert_eq!(frames[0], b"1.0");
+        assert_eq!(frames[2], b"domain");
+        assert_eq!(frames[5], b"PLAIN");
+        assert_eq!(frames[6], b"user");
+        assert_eq!(frames[7], b"pass");
+        let status = if accept {
+            b"200".as_slice()
+        } else {
+            b"400".as_slice()
+        };
+        let text = if accept {
+            b"OK".as_slice()
+        } else {
+            b"DENIED".as_slice()
+        };
+        let reply = [
+            b"1.0".as_slice(),
+            frames[1].as_slice(),
+            status,
+            text,
+            b"user".as_slice(),
+            b"".as_slice(),
+        ];
+        for (index, frame) in reply.iter().enumerate() {
+            let flags = if index + 1 == reply.len() {
+                0
+            } else {
+                ZMQ_SNDMORE
+            };
+            assert_eq!(
+                zmq_send(zap, frame.as_ptr().cast(), frame.len(), flags),
+                frame.len() as c_int
+            );
+        }
+    })
+}
+
+fn recv_multipart_c(socket: *mut c_void) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    loop {
+        let mut buffer = [0u8; 256];
+        let size = recv_retry(socket, &mut buffer);
+        assert!(size >= 0);
+        frames.push(buffer[..size as usize].to_vec());
+        let mut more = 0;
+        let mut more_size = size_of::<c_int>();
+        assert_eq!(
+            zmq_getsockopt(
+                socket,
+                ZMQ_RCVMORE,
+                (&mut more as *mut c_int).cast(),
+                &mut more_size
+            ),
+            0
+        );
+        if more == 0 {
+            return frames;
+        }
+    }
 }
 
 #[test]
@@ -436,6 +1374,14 @@ fn unused_tcp_port() -> u16 {
         .port()
 }
 
+fn unused_udp_port() -> u16 {
+    UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
 fn recv_retry(socket: *mut c_void, buffer: &mut [u8]) -> c_int {
     let mut rc = -1;
     for _ in 0..20 {
@@ -446,6 +1392,21 @@ fn recv_retry(socket: *mut c_void, buffer: &mut [u8]) -> c_int {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     rc
+}
+
+fn recv_retry_errno(socket: *mut c_void) -> c_int {
+    let mut buffer = [0u8; 16];
+    for _ in 0..20 {
+        if zmq_recv(socket, buffer.as_mut_ptr().cast(), buffer.len(), 0) >= 0 {
+            return 0;
+        }
+        let errno = zmq_errno();
+        if errno != EAGAIN {
+            return errno;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    zmq_errno()
 }
 
 #[test]
@@ -594,6 +1555,110 @@ fn push_pull_inproc_round_trip_over_c_abi() {
 }
 
 #[test]
+fn channel_inproc_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_CHANNEL);
+    let client = zmq_socket(ctx, ZMQ_CHANNEL);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+
+    let endpoint = c"inproc://c_channel";
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    assert_eq!(zmq_send(client, b"hello".as_ptr().cast(), 5, 0), 5);
+    let mut buffer = [0u8; 16];
+    assert_eq!(
+        zmq_recv(server, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        5
+    );
+    assert_eq!(&buffer[..5], b"hello");
+
+    assert_eq!(zmq_send(server, b"world".as_ptr().cast(), 5, 0), 5);
+    assert_eq!(
+        zmq_recv(client, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        5
+    );
+    assert_eq!(&buffer[..5], b"world");
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn scatter_gather_inproc_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let gather = zmq_socket(ctx, ZMQ_GATHER);
+    let scatter = zmq_socket(ctx, ZMQ_SCATTER);
+    assert!(!gather.is_null());
+    assert!(!scatter.is_null());
+
+    let endpoint = c"inproc://c_scatter_gather";
+    assert_eq!(zmq_bind(gather, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(scatter, endpoint.as_ptr()), 0);
+
+    assert_eq!(zmq_send(scatter, b"job".as_ptr().cast(), 3, 0), 3);
+    let mut buffer = [0u8; 8];
+    assert_eq!(
+        zmq_recv(gather, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        3
+    );
+    assert_eq!(&buffer[..3], b"job");
+
+    assert_eq!(zmq_send(gather, b"bad".as_ptr().cast(), 3, 0), -1);
+    assert_eq!(zmq_errno(), ENOTSUP);
+    assert_eq!(
+        zmq_recv(scatter, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        -1
+    );
+    assert_eq!(zmq_errno(), ENOTSUP);
+
+    assert_eq!(zmq_close(scatter), 0);
+    assert_eq!(zmq_close(gather), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn scatter_gather_inproc_load_balances_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let scatter = zmq_socket(ctx, ZMQ_SCATTER);
+    let gather_a = zmq_socket(ctx, ZMQ_GATHER);
+    let gather_b = zmq_socket(ctx, ZMQ_GATHER);
+    assert!(!scatter.is_null());
+    assert!(!gather_a.is_null());
+    assert!(!gather_b.is_null());
+
+    let endpoint = c"inproc://c_scatter_lb";
+    assert_eq!(zmq_bind(scatter, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(gather_a, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(gather_b, endpoint.as_ptr()), 0);
+
+    assert_eq!(zmq_send(scatter, b"one".as_ptr().cast(), 3, 0), 3);
+    assert_eq!(zmq_send(scatter, b"two".as_ptr().cast(), 3, 0), 3);
+
+    let mut buffer = [0u8; 8];
+    assert_eq!(
+        zmq_recv(gather_a, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        3
+    );
+    assert_eq!(&buffer[..3], b"one");
+    assert_eq!(
+        zmq_recv(gather_b, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        3
+    );
+    assert_eq!(&buffer[..3], b"two");
+
+    assert_eq!(zmq_close(gather_b), 0);
+    assert_eq!(zmq_close(gather_a), 0);
+    assert_eq!(zmq_close(scatter), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
 fn dealer_router_inproc_sets_routing_id_over_c_abi() {
     let ctx = zmq_ctx_new();
     assert!(!ctx.is_null());
@@ -624,6 +1689,105 @@ fn dealer_router_inproc_sets_routing_id_over_c_abi() {
     assert_eq!(zmq_msg_close(&mut inbound), 0);
     assert_eq!(zmq_close(dealer), 0);
     assert_eq!(zmq_close(router), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn server_client_inproc_round_trip_sets_routing_id_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_SERVER);
+    let client = zmq_socket(ctx, ZMQ_CLIENT);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+
+    let endpoint = c"inproc://c_server_client";
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    assert_eq!(zmq_send(client, b"request".as_ptr().cast(), 7, 0), 7);
+
+    let mut request = MaybeUninit::<zmq_msg_t>::uninit();
+    assert_eq!(zmq_msg_init(request.as_mut_ptr()), 0);
+    let mut request = unsafe { request.assume_init() };
+    assert_eq!(zmq_msg_recv(&mut request, server, 0), 7);
+    let routing_id = zmq_msg_routing_id(&mut request);
+    assert_ne!(routing_id, 0);
+
+    assert_eq!(
+        zmq_send(server, b"missing route".as_ptr().cast(), 13, 0),
+        -1
+    );
+    assert_eq!(zmq_errno(), EAGAIN);
+
+    let mut reply = MaybeUninit::<zmq_msg_t>::uninit();
+    assert_eq!(zmq_msg_init_size(reply.as_mut_ptr(), 5), 0);
+    let mut reply = unsafe { reply.assume_init() };
+    unsafe {
+        ptr::copy_nonoverlapping(b"reply".as_ptr(), zmq_msg_data(&mut reply).cast::<u8>(), 5);
+    }
+    assert_eq!(zmq_msg_set_routing_id(&mut reply, routing_id), 0);
+    assert_eq!(zmq_msg_send(&mut reply, server, 0), 5);
+
+    let mut buffer = [0u8; 16];
+    assert_eq!(
+        zmq_recv(client, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        5
+    );
+    assert_eq!(&buffer[..5], b"reply");
+
+    assert_eq!(zmq_msg_close(&mut reply), 0);
+    assert_eq!(zmq_msg_close(&mut request), 0);
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn peer_inproc_round_trip_sets_routing_id_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let bound = zmq_socket(ctx, ZMQ_PEER);
+    let connected = zmq_socket(ctx, ZMQ_PEER);
+    assert!(!bound.is_null());
+    assert!(!connected.is_null());
+
+    let endpoint = c"inproc://c_peer";
+    assert_eq!(zmq_bind(bound, endpoint.as_ptr()), 0);
+    assert_ne!(zmq_connect_peer(connected, endpoint.as_ptr()), 0);
+
+    assert_eq!(zmq_send(connected, b"request".as_ptr().cast(), 7, 0), 7);
+
+    let mut request = MaybeUninit::<zmq_msg_t>::uninit();
+    assert_eq!(zmq_msg_init(request.as_mut_ptr()), 0);
+    let mut request = unsafe { request.assume_init() };
+    assert_eq!(zmq_msg_recv(&mut request, bound, 0), 7);
+    let routing_id = zmq_msg_routing_id(&mut request);
+    assert_ne!(routing_id, 0);
+
+    assert_eq!(zmq_send(bound, b"missing route".as_ptr().cast(), 13, 0), -1);
+    assert_eq!(zmq_errno(), EAGAIN);
+
+    let mut reply = MaybeUninit::<zmq_msg_t>::uninit();
+    assert_eq!(zmq_msg_init_size(reply.as_mut_ptr(), 5), 0);
+    let mut reply = unsafe { reply.assume_init() };
+    unsafe {
+        ptr::copy_nonoverlapping(b"reply".as_ptr(), zmq_msg_data(&mut reply).cast::<u8>(), 5);
+    }
+    assert_eq!(zmq_msg_set_routing_id(&mut reply, routing_id), 0);
+    assert_eq!(zmq_msg_send(&mut reply, bound, 0), 5);
+
+    let mut buffer = [0u8; 16];
+    assert_eq!(
+        zmq_recv(connected, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        5
+    );
+    assert_eq!(&buffer[..5], b"reply");
+
+    assert_eq!(zmq_msg_close(&mut reply), 0);
+    assert_eq!(zmq_msg_close(&mut request), 0);
+    assert_eq!(zmq_close(connected), 0);
+    assert_eq!(zmq_close(bound), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
 
@@ -787,6 +1951,70 @@ fn pub_sub_inproc_filters_subscriptions_over_c_abi() {
 
     assert_eq!(zmq_close(subscriber), 0);
     assert_eq!(zmq_close(publisher), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn radio_dish_inproc_filters_groups_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let radio = zmq_socket(ctx, ZMQ_RADIO);
+    let dish = zmq_socket(ctx, ZMQ_DISH);
+    assert!(!radio.is_null());
+    assert!(!dish.is_null());
+
+    let endpoint = c"inproc://c_radio_dish";
+    assert_eq!(zmq_bind(radio, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(dish, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_join(dish, c"updates".as_ptr()), 0);
+
+    let mut ignored = MaybeUninit::<zmq_msg_t>::uninit();
+    assert_eq!(zmq_msg_init_size(ignored.as_mut_ptr(), 3), 0);
+    let mut ignored = unsafe { ignored.assume_init() };
+    unsafe {
+        ptr::copy_nonoverlapping(b"old".as_ptr(), zmq_msg_data(&mut ignored).cast::<u8>(), 3);
+    }
+    assert_eq!(zmq_msg_set_group(&mut ignored, c"archive".as_ptr()), 0);
+    assert_eq!(zmq_msg_send(&mut ignored, radio, 0), 3);
+
+    let mut inbound = MaybeUninit::<zmq_msg_t>::uninit();
+    assert_eq!(zmq_msg_init(inbound.as_mut_ptr()), 0);
+    let mut inbound = unsafe { inbound.assume_init() };
+    assert_eq!(zmq_msg_recv(&mut inbound, dish, 0), -1);
+    assert_eq!(zmq_errno(), EAGAIN);
+
+    let mut outbound = MaybeUninit::<zmq_msg_t>::uninit();
+    assert_eq!(zmq_msg_init_size(outbound.as_mut_ptr(), 3), 0);
+    let mut outbound = unsafe { outbound.assume_init() };
+    unsafe {
+        ptr::copy_nonoverlapping(b"new".as_ptr(), zmq_msg_data(&mut outbound).cast::<u8>(), 3);
+    }
+    assert_eq!(zmq_msg_set_group(&mut outbound, c"updates".as_ptr()), 0);
+    assert_eq!(zmq_msg_send(&mut outbound, radio, 0), 3);
+    assert_eq!(zmq_msg_recv(&mut inbound, dish, 0), 3);
+    let data = unsafe { std::slice::from_raw_parts(zmq_msg_data(&mut inbound).cast::<u8>(), 3) };
+    assert_eq!(data, b"new");
+    let group = unsafe { CStr::from_ptr(zmq_msg_group(&mut inbound)) };
+    assert_eq!(group.to_bytes(), b"updates");
+
+    assert_eq!(zmq_leave(dish, c"updates".as_ptr()), 0);
+    let mut later = MaybeUninit::<zmq_msg_t>::uninit();
+    assert_eq!(zmq_msg_init_size(later.as_mut_ptr(), 5), 0);
+    let mut later = unsafe { later.assume_init() };
+    unsafe {
+        ptr::copy_nonoverlapping(b"later".as_ptr(), zmq_msg_data(&mut later).cast::<u8>(), 5);
+    }
+    assert_eq!(zmq_msg_set_group(&mut later, c"updates".as_ptr()), 0);
+    assert_eq!(zmq_msg_send(&mut later, radio, 0), 5);
+    assert_eq!(zmq_msg_recv(&mut inbound, dish, 0), -1);
+    assert_eq!(zmq_errno(), EAGAIN);
+
+    assert_eq!(zmq_msg_close(&mut later), 0);
+    assert_eq!(zmq_msg_close(&mut outbound), 0);
+    assert_eq!(zmq_msg_close(&mut inbound), 0);
+    assert_eq!(zmq_msg_close(&mut ignored), 0);
+    assert_eq!(zmq_close(dish), 0);
+    assert_eq!(zmq_close(radio), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
 
@@ -1171,6 +2399,117 @@ fn socket_options_round_trip_over_c_abi() {
 
     assert_eq!(zmq_close(socket), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn security_options_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let socket = zmq_socket(ctx, ZMQ_REQ);
+    assert!(!socket.is_null());
+
+    let mut value = 0;
+    let mut size = size_of::<c_int>();
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_MECHANISM,
+            (&mut value as *mut c_int).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(value, ZMQ_NULL);
+
+    value = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            socket,
+            ZMQ_PLAIN_SERVER,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(socket, ZMQ_PLAIN_USERNAME, b"user".as_ptr().cast(), 4),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(socket, ZMQ_PLAIN_PASSWORD, b"pass".as_ptr().cast(), 4),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(socket, ZMQ_ZAP_DOMAIN, b"domain".as_ptr().cast(), 6),
+        0
+    );
+
+    value = 0;
+    size = size_of::<c_int>();
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_MECHANISM,
+            (&mut value as *mut c_int).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(value, ZMQ_PLAIN);
+    let mut bytes = [0u8; 16];
+    let mut byte_size = bytes.len();
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_PLAIN_USERNAME,
+            bytes.as_mut_ptr().cast(),
+            &mut byte_size
+        ),
+        0
+    );
+    assert_eq!(&bytes[..byte_size], b"user");
+
+    assert_eq!(zmq_close(socket), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn z85_and_curve_helpers_work_over_c_abi() {
+    let data = [0x86, 0x4F, 0xD2, 0x6F, 0xB5, 0x59, 0xF7, 0x5B];
+    let mut encoded = [0 as c_char; 11];
+    assert_eq!(
+        zmq_z85_encode(encoded.as_mut_ptr(), data.as_ptr(), data.len()),
+        encoded.as_mut_ptr()
+    );
+    let encoded_text = unsafe { CStr::from_ptr(encoded.as_ptr()) };
+    assert_eq!(encoded_text.to_bytes(), b"HelloWorld");
+    let mut decoded = [0u8; 8];
+    assert_eq!(
+        zmq_z85_decode(decoded.as_mut_ptr(), encoded.as_ptr()),
+        decoded.as_mut_ptr()
+    );
+    assert_eq!(decoded, data);
+
+    let mut public = [0 as c_char; 41];
+    let mut secret = [0 as c_char; 41];
+    assert_eq!(
+        zmq_curve_keypair(public.as_mut_ptr(), secret.as_mut_ptr()),
+        0
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(public.as_ptr()) }.to_bytes().len(),
+        40
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(secret.as_ptr()) }.to_bytes().len(),
+        40
+    );
+    let mut derived = [0 as c_char; 41];
+    assert_eq!(zmq_curve_public(derived.as_mut_ptr(), secret.as_ptr()), 0);
+    assert_eq!(
+        unsafe { CStr::from_ptr(derived.as_ptr()) }.to_bytes(),
+        unsafe { CStr::from_ptr(public.as_ptr()) }.to_bytes()
+    );
 }
 
 #[test]
