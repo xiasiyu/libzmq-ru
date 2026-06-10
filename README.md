@@ -19,3 +19,14 @@ The implementation is intentionally split into shared core logic, a safe Rust AP
 - Reimplement tests in Rust and use differential tests against the original C++ implementation.
 - Keep performance regression below 5% versus original C++ `libzmq`.
 - Keep handwritten unsafe code below 10%.
+
+## Release Readiness
+
+This rewrite is not yet a full-compatible release. Current hardening status, blockers, and required gates are tracked in `docs/release-hardening.md`.
+
+Useful release documents:
+
+- `docs/abi-checklist.md`: C ABI surface checklist.
+- `docs/c-abi-compatibility.md`: C ABI compatibility notes.
+- `docs/rust-native-api.md`: Rust API overview.
+- `docs/migration-guide.md`: migration caveats and release candidate checks.

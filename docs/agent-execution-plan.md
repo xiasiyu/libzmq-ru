@@ -471,27 +471,29 @@ Completion checks:
 
 Status note: Phase 13 completed with `cargo run -p libzmq-test-harness --bin unsafe-report -- --write docs/unsafe-report.md`. The generated report separates production source from test harness/oracle source, excludes generated bindings because none are present, and enforces production unsafe only under `crates/libzmq-ffi/src/` and `crates/libzmq-sys/src/`. Current production source has 119 unsafe lines across 9,861 nonblank code lines for a 1.21% unsafe-line ratio, below both the 8% default-feature gate and 10% full-feature handwritten gate. `cargo clippy --workspace --all-features --all-targets` passes; production source keeps `clippy::undocumented_unsafe_blocks` enforcement, while C ABI tests and C++ oracle harnesses carry explicit test/harness-only exemptions because they intentionally exercise raw-pointer boundaries outside the production unsafe percentage gate.
 
-## Phase 14: Release Hardening [ ]
+## Phase 14: Release Hardening [~]
 
 Goal: prepare the first full-compatible release.
 
-- [ ] Full API checklist complete.
-- [ ] Full feature checklist complete.
-- [ ] Full test checklist complete.
-- [ ] Linux CI passes.
-- [ ] macOS CI passes.
-- [ ] Windows CI passes.
-- [ ] `cargo test --workspace` passes.
-- [ ] `cargo test --workspace --all-features` passes.
-- [ ] Differential suite passes.
-- [ ] Interop suite passes.
-- [ ] Fuzz smoke tests pass.
-- [ ] Performance gate passes.
-- [ ] Unsafe gate passes.
-- [ ] C ABI symbols validated.
-- [ ] Rust native API docs complete.
-- [ ] C ABI compatibility notes complete.
-- [ ] Migration guide complete.
+- [~] Full API checklist complete.
+- [!] Full feature checklist complete.
+- [~] Full test checklist complete.
+- [~] Linux CI passes.
+- [~] macOS CI passes.
+- [!] Windows CI passes.
+- [x] `cargo test --workspace` passes.
+- [x] `cargo test --workspace --all-features` passes.
+- [x] Differential suite passes.
+- [~] Interop suite passes.
+- [!] Fuzz smoke tests pass.
+- [x] Performance gate passes.
+- [x] Unsafe gate passes.
+- [~] C ABI symbols validated.
+- [x] Rust native API docs complete.
+- [x] C ABI compatibility notes complete.
+- [x] Migration guide complete.
+
+Status note: Phase 14 is in progress. Release hardening docs now exist in `docs/release-hardening.md`, `docs/c-abi-compatibility.md`, `docs/rust-native-api.md`, and `docs/migration-guide.md`. On macOS, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-features --all-targets`, `cargo test --workspace`, `cargo test --workspace --all-features`, `cargo check --workspace --target x86_64-unknown-linux-gnu`, `cargo build -p libzmq-ffi --all-features`, the differential runner, message/stable oracle comparisons, same-process and process-isolated TCP interop including NULL/PLAIN/CURVE directions, unsafe report generation, performance gate generation, and local `nm -gU target/debug/libzmq.dylib` symbol inspection pass. Phase 14 remains incomplete because full feature scope is still blocked by Phase 10/11 gaps, Windows CI/export validation has not run in this environment, fuzz targets do not exist yet, and real GSSAPI interop still requires a configured Kerberos principal/keytab or credential cache.
 
 ## Next Agent Task Queue
 

@@ -473,6 +473,12 @@ impl ZmtpMetadata {
         let mut body = Vec::new();
         body.push(5);
         body.extend_from_slice(b"READY");
+        body.extend_from_slice(&self.encode_properties());
+        body
+    }
+
+    pub fn encode_properties(&self) -> Vec<u8> {
+        let mut body = Vec::new();
         for (name, value) in &self.properties {
             body.push(name.len().min(u8::MAX as usize) as u8);
             body.extend_from_slice(&name.as_bytes()[..name.len().min(u8::MAX as usize)]);
@@ -486,7 +492,11 @@ impl ZmtpMetadata {
         if body.len() < 6 || body[0] != 5 || &body[1..6] != b"READY" {
             return Err(Error::InvalidArgument);
         }
-        let mut offset = 6;
+        Self::decode_properties(&body[6..])
+    }
+
+    pub fn decode_properties(body: &[u8]) -> Result<Self> {
+        let mut offset = 0;
         let mut properties = Vec::new();
         while offset < body.len() {
             let name_len = body[offset] as usize;
@@ -699,6 +709,10 @@ mod tests {
         let metadata = ZmtpMetadata::new([("Socket-Type", b"PAIR".to_vec())]);
         let decoded = ZmtpMetadata::decode_ready(&metadata.encode_ready()).unwrap();
         assert_eq!(decoded.get("Socket-Type"), Some(b"PAIR".as_slice()));
+        let raw = metadata.encode_properties();
+        assert_ne!(&raw[..6.min(raw.len())], b"\x05READY");
+        let decoded_raw = ZmtpMetadata::decode_properties(&raw).unwrap();
+        assert_eq!(decoded_raw.get("Socket-Type"), Some(b"PAIR".as_slice()));
         assert_eq!(
             ZmtpMetadata::decode_ready(b"HELLO"),
             Err(Error::InvalidArgument)

@@ -35,8 +35,6 @@ use std::time::{Duration, Instant};
 use zeroize::Zeroize;
 
 const ZMTP_FLAG_LONG_LOCAL: u8 = 0x02;
-const ZMTP_FLAG_COMMAND_LOCAL: u8 = 0x04;
-
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SocketType {
@@ -3282,7 +3280,7 @@ impl CurveClientHandshake {
             &server_transient_public,
             &self.transient_secret,
         )?;
-        let _ = ZmtpMetadata::decode_ready(&ready_command_body_from_metadata(plaintext))?;
+        let _ = ZmtpMetadata::decode_properties(&plaintext)?;
         Ok(())
     }
 
@@ -3456,8 +3454,7 @@ fn parse_curve_initiate(
     {
         return Err(Error::InvalidArgument);
     }
-    let _ =
-        ZmtpMetadata::decode_ready(&ready_command_body_from_metadata(plaintext[128..].to_vec()))?;
+    let _ = ZmtpMetadata::decode_properties(&plaintext[128..])?;
     Ok(CurveInitiate { client_public_key })
 }
 
@@ -3492,10 +3489,10 @@ fn curve_message_frame(session: &mut CurveSession, data: &[u8], more: bool) -> R
     let body_len = 1 + "MESSAGE".len() + 8 + ciphertext.len();
     let mut frame = Vec::with_capacity(9 + body_len);
     if body_len <= u8::MAX as usize {
-        frame.push(ZMTP_FLAG_COMMAND_LOCAL);
+        frame.push(0);
         frame.push(body_len as u8);
     } else {
-        frame.push(ZMTP_FLAG_COMMAND_LOCAL | ZMTP_FLAG_LONG_LOCAL);
+        frame.push(ZMTP_FLAG_LONG_LOCAL);
         frame.extend_from_slice(&(body_len as u64).to_be_bytes());
     }
     frame.push("MESSAGE".len() as u8);
@@ -3515,10 +3512,10 @@ fn curve_message_frame_sodium(
     let body_len = 1 + "MESSAGE".len() + 8 + 16 + payload.len();
     let mut frame = Vec::with_capacity(9 + body_len);
     if body_len <= u8::MAX as usize {
-        frame.push(ZMTP_FLAG_COMMAND_LOCAL);
+        frame.push(0);
         frame.push(body_len as u8);
     } else {
-        frame.push(ZMTP_FLAG_COMMAND_LOCAL | ZMTP_FLAG_LONG_LOCAL);
+        frame.push(ZMTP_FLAG_LONG_LOCAL);
         frame.extend_from_slice(&(body_len as u64).to_be_bytes());
     }
     frame.push("MESSAGE".len() as u8);
@@ -3741,14 +3738,32 @@ fn fill_random(bytes: &mut [u8]) -> Result<()> {
 }
 
 fn socket_type_metadata(socket_type: SocketType) -> Vec<u8> {
-    ready_command_body(socket_type)
-        .into_iter()
-        .skip(6)
-        .collect()
+    let socket_type = socket_type_name(socket_type);
+    ZmtpMetadata::new([("Socket-Type", socket_type.as_bytes().to_vec())]).encode_properties()
 }
 
-fn ready_command_body_from_metadata(metadata: Vec<u8>) -> Vec<u8> {
-    command_body("READY", metadata)
+fn socket_type_name(socket_type: SocketType) -> &'static str {
+    match socket_type {
+        SocketType::Pair => "PAIR",
+        SocketType::Pull => "PULL",
+        SocketType::Push => "PUSH",
+        SocketType::Req => "REQ",
+        SocketType::Rep => "REP",
+        SocketType::Dealer => "DEALER",
+        SocketType::Router => "ROUTER",
+        SocketType::Server => "SERVER",
+        SocketType::Client => "CLIENT",
+        SocketType::Peer => "PEER",
+        SocketType::Dgram => "DGRAM",
+        SocketType::Pub => "PUB",
+        SocketType::Sub => "SUB",
+        SocketType::Channel => "CHANNEL",
+        SocketType::Scatter => "SCATTER",
+        SocketType::Gather => "GATHER",
+        SocketType::Radio => "RADIO",
+        SocketType::Dish => "DISH",
+        _ => "PAIR",
+    }
 }
 
 fn write_gssapi_handshake_tcp(
@@ -4251,27 +4266,7 @@ fn command_tail_body<'a>(body: &'a [u8], expected: &str) -> Result<&'a [u8]> {
 }
 
 fn ready_command_body(socket_type: SocketType) -> Vec<u8> {
-    let socket_type = match socket_type {
-        SocketType::Pair => "PAIR",
-        SocketType::Pull => "PULL",
-        SocketType::Push => "PUSH",
-        SocketType::Req => "REQ",
-        SocketType::Rep => "REP",
-        SocketType::Dealer => "DEALER",
-        SocketType::Router => "ROUTER",
-        SocketType::Server => "SERVER",
-        SocketType::Client => "CLIENT",
-        SocketType::Peer => "PEER",
-        SocketType::Dgram => "DGRAM",
-        SocketType::Pub => "PUB",
-        SocketType::Sub => "SUB",
-        SocketType::Channel => "CHANNEL",
-        SocketType::Scatter => "SCATTER",
-        SocketType::Gather => "GATHER",
-        SocketType::Radio => "RADIO",
-        SocketType::Dish => "DISH",
-        _ => "PAIR",
-    };
+    let socket_type = socket_type_name(socket_type);
     ZmtpMetadata::new([("Socket-Type", socket_type.as_bytes().to_vec())]).encode_ready()
 }
 

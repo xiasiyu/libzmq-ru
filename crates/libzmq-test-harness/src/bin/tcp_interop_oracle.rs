@@ -6,6 +6,7 @@ use std::env;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::mem;
 use std::net::TcpListener;
+use std::path::Path;
 use std::ptr;
 
 use libzmq_core::{curve_keypair, ZmtpFrame, ZmtpGreeting};
@@ -64,8 +65,7 @@ struct CppZmq {
 }
 
 fn main() {
-    let path = env::var("LIBZMQ_ORACLE")
-        .unwrap_or_else(|_| "../libzmq/build-ru-oracle/lib/libzmq.dylib".to_string());
+    let path = oracle_path();
     let path = CString::new(path).expect("oracle library path contains no interior nul");
     // SAFETY: `path` is a valid NUL-terminated string and `RTLD_NOW` is a valid dlopen flag.
     let handle = unsafe { dlopen(path.as_ptr(), RTLD_NOW) };
@@ -82,6 +82,21 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(1);
     }
+}
+
+fn oracle_path() -> String {
+    if let Ok(path) = env::var("LIBZMQ_ORACLE") {
+        return path;
+    }
+    for candidate in [
+        "../libzmq/build-ru-oracle-secure/lib/libzmq.dylib",
+        "../libzmq/build-ru-oracle-curve/lib/libzmq.dylib",
+    ] {
+        if Path::new(candidate).exists() {
+            return candidate.to_string();
+        }
+    }
+    "../libzmq/build-ru-oracle/lib/libzmq.dylib".to_string()
 }
 
 fn run(handle: *mut c_void) -> Result<(), String> {
@@ -775,15 +790,6 @@ fn cpp_curve_server_rust_curve_client(cpp: &CppZmq) -> Result<(), String> {
                 std::mem::size_of_val(&enabled),
             ),
             "cpp curve server option",
-        )?;
-        assert_rc(
-            (cpp.setsockopt)(
-                server,
-                ZMQ_CURVE_PUBLICKEY,
-                server_public.as_ptr().cast(),
-                server_public.len(),
-            ),
-            "cpp curve public",
         )?;
         assert_rc(
             (cpp.setsockopt)(

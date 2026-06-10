@@ -10,14 +10,14 @@ Samples: `3`
 
 | Case | Metric | C++ median | Rust median | Gate | Result |
 | --- | --- | ---: | ---: | --- | --- |
-| Inproc Latency | Latency | 420 ns/msg | 312 ns/msg | rust <= cpp * 1.05 | PASS |
-| Inproc Throughput | Throughput | 1727020 msg/s | 2463291 msg/s | rust >= cpp * 0.95 | PASS |
-| Tcp Latency | Latency | 128526 ns/msg | 29711 ns/msg | rust <= cpp * 1.05 | PASS |
-| Tcp Throughput | Throughput | 11207 msg/s | 39214 msg/s | rust >= cpp * 0.95 | PASS |
-| Ipc Latency | Latency | 66142 ns/msg | 5209 ns/msg | rust <= cpp * 1.05 | PASS |
-| Ipc Throughput | Throughput | 15262 msg/s | 150729 msg/s | rust >= cpp * 0.95 | PASS |
-| Proxy Throughput | Throughput | 1594909 msg/s | 1533312 msg/s | rust >= cpp * 0.95 | PASS |
-| Subscription Lookup | Throughput | 2145895 msg/s | 2899837 msg/s | rust >= cpp * 0.95 | PASS |
-| CURVE Throughput | Throughput | 12148 msg/s | 35192 msg/s | rust >= cpp * 0.95 | PASS |
-| WS Throughput | Throughput | 13465 msg/s | 34625 msg/s | rust >= cpp * 0.95 | PASS |
-| WSS Throughput | Throughput | 12258 msg/s | 33736 msg/s | rust >= cpp * 0.95 | PASS |
+| Inproc Latency | Latency | 349 ns/msg | 303 ns/msg | rust <= cpp * 1.05 | PASS |
+| Inproc Throughput | Throughput | 2712769 msg/s | 3139077 msg/s | rust >= cpp * 0.95 | PASS |
+| Tcp Latency | Latency | 81862 ns/msg | 23737 ns/msg | rust <= cpp * 1.05 | PASS |
+| Tcp Throughput | Throughput | 12943 msg/s | 39183 msg/s | rust >= cpp * 0.95 | PASS |
+| Ipc Latency | Latency | 64595 ns/msg | 5514 ns/msg | rust <= cpp * 1.05 | PASS |
+| Ipc Throughput | Throughput | 15156 msg/s | 184884 msg/s | rust >= cpp * 0.95 | PASS |
+| Proxy Throughput | Throughput | 1489718 msg/s | 1500871 msg/s | rust >= cpp * 0.95 | PASS |
+| Subscription Lookup | Throughput | 2268757 msg/s | 2970294 msg/s | rust >= cpp * 0.95 | PASS |
+| CURVE Throughput | Throughput | 12259 msg/s | 33762 msg/s | rust >= cpp * 0.95 | PASS |
+| WS Throughput | Throughput | 12860 msg/s | 33894 msg/s | rust >= cpp * 0.95 | PASS |
+| WSS Throughput | Throughput | 11592 msg/s | 34243 msg/s | rust >= cpp * 0.95 | PASS |
