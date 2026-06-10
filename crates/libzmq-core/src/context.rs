@@ -83,7 +83,7 @@ impl SubscriptionState {
         self.prefixes.iter().map(Vec::as_slice)
     }
 
-    fn matches_prefix_of(&self, data: &[u8]) -> bool {
+    pub(crate) fn matches_prefix_of(&self, data: &[u8]) -> bool {
         if self.has_empty {
             return true;
         }

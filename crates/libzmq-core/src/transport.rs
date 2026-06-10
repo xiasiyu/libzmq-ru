@@ -15,6 +15,7 @@ pub enum Endpoint {
     Ws(WsEndpoint),
     Wss(WsEndpoint),
     Ipc(IpcEndpoint),
+    Norm(NormEndpoint),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +40,13 @@ pub struct WsEndpoint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IpcEndpoint {
     path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormEndpoint {
+    interface: Option<String>,
+    address: String,
+    port: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +91,9 @@ impl Endpoint {
         }
         if endpoint.starts_with("ipc://") {
             return IpcEndpoint::parse(endpoint).map(Self::Ipc);
+        }
+        if endpoint.starts_with("norm://") {
+            return NormEndpoint::parse(endpoint).map(Self::Norm);
         }
         Err(Error::NotSupported)
     }
@@ -236,6 +247,42 @@ impl IpcEndpoint {
 
     pub fn path(&self) -> &str {
         &self.path
+    }
+}
+
+impl NormEndpoint {
+    pub fn parse(endpoint: &str) -> Result<Self> {
+        let authority = endpoint
+            .strip_prefix("norm://")
+            .ok_or(Error::InvalidArgument)?;
+        let (interface, authority) = match authority.split_once(';') {
+            Some((interface, rest)) if !interface.is_empty() && !rest.is_empty() => {
+                (Some(interface.to_string()), rest)
+            }
+            Some(_) => return Err(Error::InvalidArgument),
+            None => (None, authority),
+        };
+        let (address, port) = split_host_port(authority)?;
+        if address.is_empty() || address == "*" {
+            return Err(Error::InvalidArgument);
+        }
+        Ok(Self {
+            interface,
+            address: address.to_string(),
+            port,
+        })
+    }
+
+    pub fn interface(&self) -> Option<&str> {
+        self.interface.as_deref()
+    }
+
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
     }
 }
 
@@ -575,11 +622,35 @@ mod tests {
     }
 
     #[test]
+    fn parses_norm_endpoints() {
+        let endpoint = NormEndpoint::parse("norm://127.0.0.1:5555").unwrap();
+        assert_eq!(endpoint.interface(), None);
+        assert_eq!(endpoint.address(), "127.0.0.1");
+        assert_eq!(endpoint.port(), 5555);
+
+        let with_interface = NormEndpoint::parse("norm://en0;224.1.2.3:6000").unwrap();
+        assert_eq!(with_interface.interface(), Some("en0"));
+        assert_eq!(with_interface.address(), "224.1.2.3");
+        assert_eq!(with_interface.port(), 6000);
+        assert!(matches!(
+            Endpoint::parse("norm://127.0.0.1:5555").unwrap(),
+            Endpoint::Norm(_)
+        ));
+        assert_eq!(
+            NormEndpoint::parse("norm://*:5555"),
+            Err(Error::InvalidArgument)
+        );
+        assert_eq!(
+            NormEndpoint::parse("norm://en0;"),
+            Err(Error::InvalidArgument)
+        );
+    }
+
+    #[test]
     fn unsupported_optional_transport_schemes_are_explicit() {
         for endpoint in [
             "pgm://127.0.0.1:5555",
             "epgm://127.0.0.1:5555",
-            "norm://127.0.0.1:5555",
             "tipc://{5560,0,0}",
             "vmci://1:5555",
             "vsock://2:5555",

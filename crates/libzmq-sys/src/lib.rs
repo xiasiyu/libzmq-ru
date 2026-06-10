@@ -20,6 +20,794 @@ pub mod platform {
     }
 }
 
+#[cfg(feature = "norm")]
+pub mod norm {
+    use std::ffi::{c_char, c_int, c_uchar, c_uint, c_ushort, c_void, CString};
+    use std::ptr;
+    use std::time::{Duration, Instant};
+
+    type NormInstanceHandle = *const c_void;
+    type NormSessionHandle = *const c_void;
+    type NormNodeHandle = *const c_void;
+    type NormObjectHandle = *const c_void;
+    type NormNodeId = u32;
+    type NormSessionId = c_ushort;
+    type NormSize = i64;
+
+    const NORM_EVENT_RX_OBJECT_COMPLETED: c_int = 20;
+    const NORM_OBJECT_DATA: c_int = 1;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Version {
+        pub major: i32,
+        pub minor: i32,
+        pub patch: i32,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct SessionConfig {
+        pub address: String,
+        pub port: u16,
+        pub local_node_id: u32,
+        pub buffer_space: u32,
+        pub segment_size: u16,
+        pub block_size: u16,
+        pub parity_segments: u16,
+    }
+
+    impl SessionConfig {
+        pub fn new(address: impl Into<String>, port: u16, local_node_id: u32) -> Self {
+            Self {
+                address: address.into(),
+                port,
+                local_node_id,
+                buffer_space: 2 * 1024 * 1024,
+                segment_size: 1400,
+                block_size: 16,
+                parity_segments: 4,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct Instance {
+        raw: NormInstanceHandle,
+    }
+
+    #[derive(Debug)]
+    pub struct Session {
+        raw: NormSessionHandle,
+        sender_started: bool,
+        receiver_started: bool,
+    }
+
+    // SAFETY: NORM handles are opaque library-managed handles. The core stores them behind a
+    // mutex, and wrapper methods require `&mut self` or external locking for state mutation.
+    unsafe impl Send for Instance {}
+    // SAFETY: NORM session handles are opaque library-managed handles. The core stores sessions
+    // behind a mutex and does not alias mutable access across threads.
+    unsafe impl Send for Session {}
+
+    #[repr(C)]
+    struct NormEvent {
+        event_type: c_int,
+        session: NormSessionHandle,
+        sender: NormNodeHandle,
+        object: NormObjectHandle,
+    }
+
+    #[link(name = "norm")]
+    unsafe extern "C" {
+        fn NormGetVersion(major: *mut c_int, minor: *mut c_int, patch: *mut c_int) -> c_int;
+        fn NormCreateInstance(priority_boost: bool) -> NormInstanceHandle;
+        fn NormDestroyInstance(instance: NormInstanceHandle);
+        fn NormCreateSession(
+            instance: NormInstanceHandle,
+            session_address: *const c_char,
+            session_port: c_ushort,
+            local_node_id: NormNodeId,
+        ) -> NormSessionHandle;
+        fn NormDestroySession(session: NormSessionHandle);
+        fn NormSetTxOnly(
+            session: NormSessionHandle,
+            tx_only: bool,
+            connect_to_session_address: bool,
+        );
+        fn NormGetRandomSessionId() -> NormSessionId;
+        fn NormStartSender(
+            session: NormSessionHandle,
+            instance_id: NormSessionId,
+            buffer_space: u32,
+            segment_size: c_ushort,
+            block_size: c_ushort,
+            num_parity: c_ushort,
+            fec_id: c_uchar,
+        ) -> bool;
+        fn NormStopSender(session: NormSessionHandle);
+        fn NormDataEnqueue(
+            session: NormSessionHandle,
+            data_ptr: *const c_char,
+            data_len: u32,
+            info_ptr: *const c_char,
+            info_len: c_uint,
+        ) -> NormObjectHandle;
+        fn NormStartReceiver(session: NormSessionHandle, buffer_space: u32) -> bool;
+        fn NormStopReceiver(session: NormSessionHandle);
+        fn NormGetNextEvent(
+            instance: NormInstanceHandle,
+            event: *mut NormEvent,
+            wait_for_event: bool,
+        ) -> bool;
+        fn NormObjectGetType(object: NormObjectHandle) -> c_int;
+        fn NormObjectGetSize(object: NormObjectHandle) -> NormSize;
+        fn NormDataAccessData(object: NormObjectHandle) -> *const c_char;
+    }
+
+    pub fn version() -> Option<Version> {
+        let mut major = 0;
+        let mut minor = 0;
+        let mut patch = 0;
+        // SAFETY: The three output pointers reference valid writable `c_int` stack slots.
+        let _ = unsafe { NormGetVersion(&mut major, &mut minor, &mut patch) };
+        (major > 0).then_some(Version {
+            major,
+            minor,
+            patch,
+        })
+    }
+
+    impl Instance {
+        pub fn new() -> Option<Self> {
+            // SAFETY: This calls the process-local NORM constructor with no borrowed inputs.
+            let raw = unsafe { NormCreateInstance(false) };
+            (!raw.is_null()).then_some(Self { raw })
+        }
+
+        pub fn create_session(&self, config: &SessionConfig) -> Option<Session> {
+            let address = CString::new(config.address.as_str()).ok()?;
+            // SAFETY: `self.raw` is a live instance and `address` is a NUL-terminated string valid
+            // for the duration of this call. Other arguments are plain scalar values.
+            let raw = unsafe {
+                NormCreateSession(
+                    self.raw,
+                    address.as_ptr(),
+                    config.port,
+                    config.local_node_id,
+                )
+            };
+            (!raw.is_null()).then_some(Session {
+                raw,
+                sender_started: false,
+                receiver_started: false,
+            })
+        }
+
+        pub fn recv_data(&self, timeout: Duration) -> Option<Vec<u8>> {
+            let deadline = Instant::now() + timeout;
+            while Instant::now() < deadline {
+                let mut event = NormEvent {
+                    event_type: 0,
+                    session: ptr::null(),
+                    sender: ptr::null(),
+                    object: ptr::null(),
+                };
+                // SAFETY: `self.raw` is a live instance and `event` is a valid writable event slot.
+                let ready = unsafe { NormGetNextEvent(self.raw, &mut event, false) };
+                if ready
+                    && event.event_type == NORM_EVENT_RX_OBJECT_COMPLETED
+                    && !event.object.is_null()
+                    // SAFETY: The event came from NORM and carries a live object handle.
+                    && unsafe { NormObjectGetType(event.object) } == NORM_OBJECT_DATA
+                {
+                    // SAFETY: The event object is completed, so size and data pointer are valid
+                    // until we release the object below.
+                    let bytes = unsafe {
+                        let size = NormObjectGetSize(event.object);
+                        let data = NormDataAccessData(event.object);
+                        if size <= 0 || data.is_null() {
+                            Vec::new()
+                        } else {
+                            std::slice::from_raw_parts(data.cast::<u8>(), size as usize).to_vec()
+                        }
+                    };
+                    return Some(bytes);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            None
+        }
+    }
+
+    impl Drop for Instance {
+        fn drop(&mut self) {
+            if !self.raw.is_null() {
+                // SAFETY: `self.raw` is owned by this wrapper and destroyed exactly once here.
+                unsafe { NormDestroyInstance(self.raw) };
+                self.raw = ptr::null();
+            }
+        }
+    }
+
+    impl Session {
+        pub fn start_receiver(&mut self, buffer_space: u32) -> Option<()> {
+            // SAFETY: `self.raw` is a live session handle and the buffer size is a scalar value.
+            let ok = unsafe { NormStartReceiver(self.raw, buffer_space) };
+            self.receiver_started = ok;
+            ok.then_some(())
+        }
+
+        pub fn start_sender(&mut self, config: &SessionConfig) -> Option<()> {
+            // SAFETY: `self.raw` is a live session handle. Tx-only mode prevents a unicast sender
+            // from binding the receiver's session port during local sender/receiver tests.
+            unsafe { NormSetTxOnly(self.raw, true, true) };
+            // SAFETY: `self.raw` is a live session handle and all sender parameters are scalar
+            // values copied from validated Rust configuration.
+            let ok = unsafe {
+                NormStartSender(
+                    self.raw,
+                    NormGetRandomSessionId(),
+                    config.buffer_space,
+                    config.segment_size,
+                    config.block_size,
+                    config.parity_segments,
+                    0,
+                )
+            };
+            self.sender_started = ok;
+            ok.then_some(())
+        }
+
+        pub fn send_data(&self, payload: &[u8]) -> Option<()> {
+            // SAFETY: `self.raw` is a live sender session, and `payload` points to initialized
+            // bytes valid for the duration of the call. No object info buffer is supplied.
+            let object = unsafe {
+                NormDataEnqueue(
+                    self.raw,
+                    payload.as_ptr().cast::<c_char>(),
+                    payload.len().try_into().ok()?,
+                    ptr::null(),
+                    0,
+                )
+            };
+            (!object.is_null()).then_some(())
+        }
+    }
+
+    impl Drop for Session {
+        fn drop(&mut self) {
+            if !self.raw.is_null() {
+                if self.sender_started {
+                    // SAFETY: Sender was started on this live session and is stopped once here.
+                    unsafe { NormStopSender(self.raw) };
+                }
+                if self.receiver_started {
+                    // SAFETY: Receiver was started on this live session and is stopped once here.
+                    unsafe { NormStopReceiver(self.raw) };
+                }
+                // SAFETY: `self.raw` is owned by this wrapper and destroyed exactly once here.
+                unsafe { NormDestroySession(self.raw) };
+                self.raw = ptr::null();
+            }
+        }
+    }
+}
+
+#[cfg(feature = "gssapi")]
+pub mod gssapi {
+    use std::ffi::{c_int, c_void};
+    use std::ptr;
+
+    type OmUint32 = u32;
+    type GssName = *mut c_void;
+    type GssCred = *mut c_void;
+    type GssCtx = *mut c_void;
+    type GssOidSet = *mut c_void;
+    type GssChannelBindings = *mut c_void;
+
+    const GSS_S_COMPLETE: OmUint32 = 0;
+    const GSS_S_CONTINUE_NEEDED: OmUint32 = 1;
+    const GSS_C_BOTH: c_int = 0;
+    const GSS_C_MUTUAL_FLAG: OmUint32 = 2;
+    const GSS_C_REPLAY_FLAG: OmUint32 = 4;
+    const GSS_C_QOP_DEFAULT: OmUint32 = 0;
+
+    const OID_HOSTBASED_SERVICE: &[u8] = b"\x2a\x86\x48\x86\xf7\x12\x01\x02\x01\x04";
+    const OID_USER_NAME: &[u8] = b"\x2a\x86\x48\x86\xf7\x12\x01\x02\x01\x01";
+    const OID_KRB5_PRINCIPAL: &[u8] = b"\x2a\x86\x48\x86\xf7\x12\x01\x02\x02\x01";
+
+    #[repr(C)]
+    struct GssBuffer {
+        length: usize,
+        value: *mut c_void,
+    }
+
+    #[repr(C)]
+    struct GssOidDesc {
+        length: OmUint32,
+        elements: *mut c_void,
+    }
+
+    unsafe extern "C" {
+        fn gss_import_name(
+            minor_status: *mut OmUint32,
+            input_name_buffer: *const GssBuffer,
+            input_name_type: *mut GssOidDesc,
+            output_name: *mut GssName,
+        ) -> OmUint32;
+        fn gss_release_name(minor_status: *mut OmUint32, input_name: *mut GssName) -> OmUint32;
+        fn gss_display_name(
+            minor_status: *mut OmUint32,
+            input_name: GssName,
+            output_name_buffer: *mut GssBuffer,
+            output_name_type: *mut *mut GssOidDesc,
+        ) -> OmUint32;
+        fn gss_acquire_cred(
+            minor_status: *mut OmUint32,
+            desired_name: GssName,
+            time_req: OmUint32,
+            desired_mechs: GssOidSet,
+            cred_usage: c_int,
+            output_cred_handle: *mut GssCred,
+            actual_mechs: *mut GssOidSet,
+            time_rec: *mut OmUint32,
+        ) -> OmUint32;
+        fn gss_release_cred(minor_status: *mut OmUint32, cred_handle: *mut GssCred) -> OmUint32;
+        fn gss_init_sec_context(
+            minor_status: *mut OmUint32,
+            claimant_cred_handle: GssCred,
+            context_handle: *mut GssCtx,
+            target_name: GssName,
+            mech_type: *mut GssOidDesc,
+            req_flags: OmUint32,
+            time_req: OmUint32,
+            input_chan_bindings: GssChannelBindings,
+            input_token: *const GssBuffer,
+            actual_mech_type: *mut *mut GssOidDesc,
+            output_token: *mut GssBuffer,
+            ret_flags: *mut OmUint32,
+            time_rec: *mut OmUint32,
+        ) -> OmUint32;
+        fn gss_accept_sec_context(
+            minor_status: *mut OmUint32,
+            context_handle: *mut GssCtx,
+            acceptor_cred_handle: GssCred,
+            input_token_buffer: *const GssBuffer,
+            input_chan_bindings: GssChannelBindings,
+            src_name: *mut GssName,
+            mech_type: *mut *mut GssOidDesc,
+            output_token: *mut GssBuffer,
+            ret_flags: *mut OmUint32,
+            time_rec: *mut OmUint32,
+            delegated_cred_handle: *mut GssCred,
+        ) -> OmUint32;
+        fn gss_delete_sec_context(
+            minor_status: *mut OmUint32,
+            context_handle: *mut GssCtx,
+            output_token: *mut GssBuffer,
+        ) -> OmUint32;
+        fn gss_release_buffer(minor_status: *mut OmUint32, buffer: *mut GssBuffer) -> OmUint32;
+        fn gss_wrap(
+            minor_status: *mut OmUint32,
+            context_handle: GssCtx,
+            conf_req_flag: c_int,
+            qop_req: OmUint32,
+            input_message_buffer: *const GssBuffer,
+            conf_state: *mut c_int,
+            output_message_buffer: *mut GssBuffer,
+        ) -> OmUint32;
+        fn gss_unwrap(
+            minor_status: *mut OmUint32,
+            context_handle: GssCtx,
+            input_message_buffer: *const GssBuffer,
+            output_message_buffer: *mut GssBuffer,
+            conf_state: *mut c_int,
+            qop_state: *mut OmUint32,
+        ) -> OmUint32;
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum NameType {
+        HostBased,
+        UserName,
+        Krb5Principal,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Error {
+        pub major: OmUint32,
+        pub minor: OmUint32,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Step {
+        Continue(Vec<u8>),
+        Complete(Vec<u8>),
+    }
+
+    pub struct ClientContext {
+        context: SecurityContext,
+        target_name: Name,
+        credential: Option<Credential>,
+    }
+
+    pub struct ServerContext {
+        context: SecurityContext,
+        credential: Option<Credential>,
+        source_name: Option<Name>,
+    }
+
+    struct SecurityContext {
+        raw: GssCtx,
+    }
+
+    struct Name {
+        raw: GssName,
+    }
+
+    struct Credential {
+        raw: GssCred,
+    }
+
+    // SAFETY: GSS contexts are opaque handles managed by the platform GSS implementation. Socket
+    // state protects them with a mutex and never aliases a context mutably across threads.
+    unsafe impl Send for ClientContext {}
+    // SAFETY: GSS contexts are opaque handles managed by the platform GSS implementation. Socket
+    // state protects them with a mutex and never aliases a context mutably across threads.
+    unsafe impl Send for ServerContext {}
+
+    impl std::fmt::Debug for ClientContext {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("ClientContext")
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl std::fmt::Debug for ServerContext {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("ServerContext")
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl ClientContext {
+        pub fn new(
+            service: &[u8],
+            service_name_type: NameType,
+            principal: Option<(&[u8], NameType)>,
+        ) -> Result<Self, Error> {
+            Ok(Self {
+                context: SecurityContext::new(),
+                target_name: Name::import(service, service_name_type)?,
+                credential: principal
+                    .map(|(name, name_type)| Credential::acquire(name, name_type))
+                    .transpose()?,
+            })
+        }
+
+        pub fn initiate(&mut self, token: Option<&[u8]>) -> Result<Step, Error> {
+            let input = token.map(BufferRef::new);
+            let input_ptr = input.as_ref().map_or(ptr::null(), |buffer| buffer.as_ptr());
+            let mut minor = 0;
+            let mut output = GssBuffer::empty();
+            let mut ret_flags = 0;
+            // SAFETY: All GSS handles are either null sentinel values or live handles owned by
+            // this wrapper. Input/output buffers point to valid memory for the call duration.
+            let major = unsafe {
+                gss_init_sec_context(
+                    &mut minor,
+                    self.credential
+                        .as_ref()
+                        .map_or(ptr::null_mut(), |cred| cred.raw),
+                    &mut self.context.raw,
+                    self.target_name.raw,
+                    ptr::null_mut(),
+                    GSS_C_MUTUAL_FLAG | GSS_C_REPLAY_FLAG,
+                    0,
+                    ptr::null_mut(),
+                    input_ptr,
+                    ptr::null_mut(),
+                    &mut output,
+                    &mut ret_flags,
+                    ptr::null_mut(),
+                )
+            };
+            step_from_status(major, minor, &mut output)
+        }
+
+        pub fn wrap(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, Error> {
+            self.context.wrap(plaintext)
+        }
+
+        pub fn unwrap(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
+            self.context.unwrap(ciphertext)
+        }
+    }
+
+    impl ServerContext {
+        pub fn new(principal: Option<(&[u8], NameType)>) -> Result<Self, Error> {
+            Ok(Self {
+                context: SecurityContext::new(),
+                credential: principal
+                    .map(|(name, name_type)| Credential::acquire(name, name_type))
+                    .transpose()?,
+                source_name: None,
+            })
+        }
+
+        pub fn accept(&mut self, token: &[u8]) -> Result<Step, Error> {
+            let input = BufferRef::new(token);
+            let mut minor = 0;
+            let mut output = GssBuffer::empty();
+            let mut source_name = ptr::null_mut();
+            let mut ret_flags = 0;
+            // SAFETY: The input token references `token` for the duration of the call, output
+            // pointers are valid, and owned credentials/context remain live while GSS uses them.
+            let major = unsafe {
+                gss_accept_sec_context(
+                    &mut minor,
+                    &mut self.context.raw,
+                    self.credential
+                        .as_ref()
+                        .map_or(ptr::null_mut(), |cred| cred.raw),
+                    input.as_ptr(),
+                    ptr::null_mut(),
+                    &mut source_name,
+                    ptr::null_mut(),
+                    &mut output,
+                    &mut ret_flags,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            };
+            if !source_name.is_null() {
+                self.source_name = Some(Name { raw: source_name });
+            }
+            step_from_status(major, minor, &mut output)
+        }
+
+        pub fn source_principal(&self) -> Result<Vec<u8>, Error> {
+            self.source_name
+                .as_ref()
+                .ok_or(Error { major: 1, minor: 0 })?
+                .display()
+        }
+
+        pub fn wrap(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, Error> {
+            self.context.wrap(plaintext)
+        }
+
+        pub fn unwrap(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
+            self.context.unwrap(ciphertext)
+        }
+    }
+
+    impl SecurityContext {
+        fn new() -> Self {
+            Self {
+                raw: ptr::null_mut(),
+            }
+        }
+
+        fn wrap(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, Error> {
+            let input = BufferRef::new(plaintext);
+            let mut minor = 0;
+            let mut output = GssBuffer::empty();
+            let mut confidential = 0;
+            // SAFETY: `self.raw` is an established context and buffers are valid for the call.
+            let major = unsafe {
+                gss_wrap(
+                    &mut minor,
+                    self.raw,
+                    1,
+                    GSS_C_QOP_DEFAULT,
+                    input.as_ptr(),
+                    &mut confidential,
+                    &mut output,
+                )
+            };
+            if major != GSS_S_COMPLETE || confidential == 0 {
+                release_buffer(&mut output);
+                return Err(Error { major, minor });
+            }
+            Ok(copy_and_release(&mut output))
+        }
+
+        fn unwrap(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
+            let input = BufferRef::new(ciphertext);
+            let mut minor = 0;
+            let mut output = GssBuffer::empty();
+            let mut confidential = 0;
+            // SAFETY: `self.raw` is an established context and buffers are valid for the call.
+            let major = unsafe {
+                gss_unwrap(
+                    &mut minor,
+                    self.raw,
+                    input.as_ptr(),
+                    &mut output,
+                    &mut confidential,
+                    ptr::null_mut(),
+                )
+            };
+            if major != GSS_S_COMPLETE || confidential == 0 {
+                release_buffer(&mut output);
+                return Err(Error { major, minor });
+            }
+            Ok(copy_and_release(&mut output))
+        }
+    }
+
+    impl Drop for SecurityContext {
+        fn drop(&mut self) {
+            if !self.raw.is_null() {
+                let mut minor = 0;
+                // SAFETY: `self.raw` is owned by this wrapper and may be deleted once here.
+                unsafe {
+                    gss_delete_sec_context(&mut minor, &mut self.raw, ptr::null_mut());
+                }
+            }
+        }
+    }
+
+    impl Name {
+        fn import(name: &[u8], name_type: NameType) -> Result<Self, Error> {
+            let mut owned = Vec::with_capacity(name.len() + 1);
+            owned.extend_from_slice(name);
+            owned.push(0);
+            let input = BufferRef::new(&owned);
+            let mut oid = oid_for(name_type);
+            let mut minor = 0;
+            let mut raw = ptr::null_mut();
+            // SAFETY: The name buffer and OID descriptor are valid for the call, and `raw` is a
+            // valid output slot for the imported GSS name.
+            let major = unsafe { gss_import_name(&mut minor, input.as_ptr(), &mut oid, &mut raw) };
+            if major != GSS_S_COMPLETE {
+                return Err(Error { major, minor });
+            }
+            Ok(Self { raw })
+        }
+
+        fn display(&self) -> Result<Vec<u8>, Error> {
+            let mut minor = 0;
+            let mut output = GssBuffer::empty();
+            // SAFETY: `self.raw` is a live GSS name and `output` is a valid output buffer.
+            let major =
+                unsafe { gss_display_name(&mut minor, self.raw, &mut output, ptr::null_mut()) };
+            if major != GSS_S_COMPLETE {
+                release_buffer(&mut output);
+                return Err(Error { major, minor });
+            }
+            Ok(copy_and_release(&mut output))
+        }
+    }
+
+    impl Drop for Name {
+        fn drop(&mut self) {
+            if !self.raw.is_null() {
+                let mut minor = 0;
+                // SAFETY: `self.raw` is owned by this wrapper and released exactly once here.
+                unsafe {
+                    gss_release_name(&mut minor, &mut self.raw);
+                }
+            }
+        }
+    }
+
+    impl Credential {
+        fn acquire(name: &[u8], name_type: NameType) -> Result<Self, Error> {
+            let imported = Name::import(name, name_type)?;
+            let mut minor = 0;
+            let mut raw = ptr::null_mut();
+            // SAFETY: `imported.raw` is a live GSS name and `raw` is a valid output slot.
+            let major = unsafe {
+                gss_acquire_cred(
+                    &mut minor,
+                    imported.raw,
+                    0,
+                    ptr::null_mut(),
+                    GSS_C_BOTH,
+                    &mut raw,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            };
+            if major != GSS_S_COMPLETE {
+                return Err(Error { major, minor });
+            }
+            Ok(Self { raw })
+        }
+    }
+
+    impl Drop for Credential {
+        fn drop(&mut self) {
+            if !self.raw.is_null() {
+                let mut minor = 0;
+                // SAFETY: `self.raw` is owned by this wrapper and released exactly once here.
+                unsafe {
+                    gss_release_cred(&mut minor, &mut self.raw);
+                }
+            }
+        }
+    }
+
+    struct BufferRef {
+        buffer: GssBuffer,
+    }
+
+    impl BufferRef {
+        fn new(bytes: &[u8]) -> Self {
+            Self {
+                buffer: GssBuffer {
+                    length: bytes.len(),
+                    value: bytes.as_ptr().cast::<c_void>().cast_mut(),
+                },
+            }
+        }
+
+        fn as_ptr(&self) -> *const GssBuffer {
+            &self.buffer
+        }
+    }
+
+    impl GssBuffer {
+        fn empty() -> Self {
+            Self {
+                length: 0,
+                value: ptr::null_mut(),
+            }
+        }
+    }
+
+    fn step_from_status(
+        major: OmUint32,
+        minor: OmUint32,
+        output: &mut GssBuffer,
+    ) -> Result<Step, Error> {
+        let token = copy_and_release(output);
+        match major {
+            GSS_S_COMPLETE => Ok(Step::Complete(token)),
+            GSS_S_CONTINUE_NEEDED => Ok(Step::Continue(token)),
+            _ => Err(Error { major, minor }),
+        }
+    }
+
+    fn copy_and_release(buffer: &mut GssBuffer) -> Vec<u8> {
+        let bytes = if buffer.value.is_null() || buffer.length == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: GSS returned `value` with `length` bytes and keeps it valid until released.
+            unsafe { std::slice::from_raw_parts(buffer.value.cast::<u8>(), buffer.length).to_vec() }
+        };
+        release_buffer(buffer);
+        bytes
+    }
+
+    fn release_buffer(buffer: &mut GssBuffer) {
+        if !buffer.value.is_null() {
+            let mut minor = 0;
+            // SAFETY: GSS allocated this buffer and expects it to be released by this function.
+            unsafe {
+                gss_release_buffer(&mut minor, buffer);
+            }
+            buffer.value = ptr::null_mut();
+            buffer.length = 0;
+        }
+    }
+
+    fn oid_for(name_type: NameType) -> GssOidDesc {
+        let bytes = match name_type {
+            NameType::HostBased => OID_HOSTBASED_SERVICE,
+            NameType::UserName => OID_USER_NAME,
+            NameType::Krb5Principal => OID_KRB5_PRINCIPAL,
+        };
+        GssOidDesc {
+            length: bytes.len() as OmUint32,
+            elements: bytes.as_ptr().cast::<c_void>().cast_mut(),
+        }
+    }
+}
+
 #[cfg(feature = "sodium")]
 pub mod sodium {
     use std::ffi::{c_int, c_uchar, c_ulonglong};
@@ -1096,5 +1884,45 @@ mod tests {
             Ok(handle) => drop(handle),
             Err(error) => assert_eq!(error.kind(), io::ErrorKind::Unsupported),
         }
+    }
+
+    #[cfg(feature = "norm")]
+    #[test]
+    fn norm_library_version_is_available() {
+        let version = crate::norm::version().expect("NORM library should report a version");
+        assert!(version.major >= 1);
+    }
+
+    #[cfg(feature = "norm")]
+    #[test]
+    fn norm_data_object_round_trip_is_available() {
+        let receiver_instance = crate::norm::Instance::new().expect("receiver instance");
+        let sender_instance = crate::norm::Instance::new().expect("sender instance");
+        let port = 20_000 + (std::process::id() % 20_000) as u16;
+        let mut receiver_config = crate::norm::SessionConfig::new("127.0.0.1", port, 1);
+        let mut sender_config = crate::norm::SessionConfig::new("127.0.0.1", port, 2);
+        receiver_config.buffer_space = 512 * 1024;
+        sender_config.buffer_space = 512 * 1024;
+
+        let mut receiver = receiver_instance
+            .create_session(&receiver_config)
+            .expect("receiver session");
+        receiver
+            .start_receiver(receiver_config.buffer_space)
+            .expect("receiver should start");
+        let mut sender = sender_instance
+            .create_session(&sender_config)
+            .expect("sender session");
+        sender
+            .start_sender(&sender_config)
+            .expect("sender should start");
+
+        sender.send_data(b"norm-ping").expect("data enqueue");
+        assert_eq!(
+            receiver_instance
+                .recv_data(Duration::from_secs(3))
+                .as_deref(),
+            Some(&b"norm-ping"[..])
+        );
     }
 }

@@ -21,6 +21,8 @@ zeroize = "1"
 
 [features]
 default = []
+gssapi = ["libzmq-sys/gssapi"]
+norm = ["libzmq-sys/norm"]
 sodium = ["libzmq-sys/sodium"]
 wss = ["dep:rcgen", "dep:rustls"]
 

@@ -115,6 +115,20 @@ pub const ZMQ_THREAD_SAFE: i32 = 81;
 pub const ZMQ_GSSAPI_PRINCIPAL_NAMETYPE: i32 = 90;
 pub const ZMQ_GSSAPI_SERVICE_PRINCIPAL_NAMETYPE: i32 = 91;
 pub const ZMQ_ZAP_ENFORCE_DOMAIN: i32 = 93;
+pub const ZMQ_NORM_MODE: i32 = 117;
+pub const ZMQ_NORM_UNICAST_NACK: i32 = 118;
+pub const ZMQ_NORM_BUFFER_SIZE: i32 = 119;
+pub const ZMQ_NORM_SEGMENT_SIZE: i32 = 120;
+pub const ZMQ_NORM_BLOCK_SIZE: i32 = 121;
+pub const ZMQ_NORM_NUM_PARITY: i32 = 122;
+pub const ZMQ_NORM_NUM_AUTOPARITY: i32 = 123;
+pub const ZMQ_NORM_PUSH: i32 = 124;
+
+pub const ZMQ_NORM_FIXED: i32 = 0;
+pub const ZMQ_NORM_CC: i32 = 1;
+pub const ZMQ_NORM_CCL: i32 = 2;
+pub const ZMQ_NORM_CCE: i32 = 3;
+pub const ZMQ_NORM_CCE_ECNONLY: i32 = 4;
 
 pub const ZMQ_NULL: i32 = 0;
 pub const ZMQ_PLAIN: i32 = 1;

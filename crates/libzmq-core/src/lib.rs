@@ -13,7 +13,9 @@ pub use error::{Error, Result};
 pub use message::Message;
 pub use security::{curve_keypair, curve_public, z85_decode, z85_encode, ZapReply, ZapRequest};
 pub use socket::{Socket, SocketType};
-pub use transport::{Endpoint, IpcEndpoint, TcpEndpoint, ZmtpFrame, ZmtpGreeting, ZmtpMetadata};
+pub use transport::{
+    Endpoint, IpcEndpoint, NormEndpoint, TcpEndpoint, ZmtpFrame, ZmtpGreeting, ZmtpMetadata,
+};
 
 pub fn version() -> (i32, i32, i32) {
     (ZMQ_VERSION_MAJOR, ZMQ_VERSION_MINOR, ZMQ_VERSION_PATCH)

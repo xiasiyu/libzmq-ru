@@ -2,13 +2,19 @@ use libzmq::{
     curve_keypair, version, Context, Error, Message, SocketType, ZMQ_CONFLATE, ZMQ_CURVE,
     ZMQ_CURVE_PUBLICKEY, ZMQ_CURVE_SECRETKEY, ZMQ_CURVE_SERVER, ZMQ_CURVE_SERVERKEY, ZMQ_GSSAPI,
     ZMQ_GSSAPI_PRINCIPAL, ZMQ_GSSAPI_SERVER, ZMQ_GSSAPI_SERVICE_PRINCIPAL, ZMQ_IO_THREADS,
-    ZMQ_LINGER, ZMQ_MAX_SOCKETS, ZMQ_MECHANISM, ZMQ_NULL, ZMQ_PLAIN, ZMQ_PLAIN_PASSWORD,
-    ZMQ_PLAIN_SERVER, ZMQ_PLAIN_USERNAME, ZMQ_RCVHWM, ZMQ_RCVMORE, ZMQ_REQ_RELAXED,
-    ZMQ_ROUTER_HANDOVER, ZMQ_ROUTER_MANDATORY, ZMQ_SNDHWM, ZMQ_SNDMORE, ZMQ_TYPE, ZMQ_XPUB_MANUAL,
-    ZMQ_XPUB_NODROP, ZMQ_XPUB_VERBOSE, ZMQ_XPUB_WELCOME_MSG, ZMQ_ZAP_DOMAIN,
+    ZMQ_LINGER, ZMQ_MAX_SOCKETS, ZMQ_MECHANISM, ZMQ_NORM_BLOCK_SIZE, ZMQ_NORM_BUFFER_SIZE,
+    ZMQ_NORM_CC, ZMQ_NORM_CCE, ZMQ_NORM_MODE, ZMQ_NORM_NUM_AUTOPARITY, ZMQ_NORM_NUM_PARITY,
+    ZMQ_NORM_PUSH, ZMQ_NORM_SEGMENT_SIZE, ZMQ_NORM_UNICAST_NACK, ZMQ_NULL, ZMQ_PLAIN,
+    ZMQ_PLAIN_PASSWORD, ZMQ_PLAIN_SERVER, ZMQ_PLAIN_USERNAME, ZMQ_RCVHWM, ZMQ_RCVMORE,
+    ZMQ_REQ_RELAXED, ZMQ_ROUTER_HANDOVER, ZMQ_ROUTER_MANDATORY, ZMQ_SNDHWM, ZMQ_SNDMORE, ZMQ_TYPE,
+    ZMQ_XPUB_MANUAL, ZMQ_XPUB_NODROP, ZMQ_XPUB_VERBOSE, ZMQ_XPUB_WELCOME_MSG, ZMQ_ZAP_DOMAIN,
 };
 use std::io::{Read, Write};
 use std::net::{TcpListener, UdpSocket};
+
+fn skip_synthetic_gssapi_test() -> bool {
+    cfg!(feature = "gssapi") && std::env::var_os("LIBZMQ_TEST_REAL_GSSAPI").is_none()
+}
 
 #[test]
 fn native_version_matches_c_abi_contract() {
@@ -436,6 +442,9 @@ fn native_pair_tcp_curve_uses_zap_actor() {
 
 #[test]
 fn native_pair_tcp_gssapi_round_trip() {
+    if skip_synthetic_gssapi_test() {
+        return;
+    }
     let port = unused_tcp_port();
     let endpoint = format!("tcp://127.0.0.1:{port}");
     let ctx = Context::new().unwrap();
@@ -464,6 +473,9 @@ fn native_pair_tcp_gssapi_round_trip() {
 
 #[test]
 fn native_pair_tcp_gssapi_rejects_bad_principal() {
+    if skip_synthetic_gssapi_test() {
+        return;
+    }
     let port = unused_tcp_port();
     let endpoint = format!("tcp://127.0.0.1:{port}");
     let ctx = Context::new().unwrap();
@@ -490,6 +502,9 @@ fn native_pair_tcp_gssapi_rejects_bad_principal() {
 
 #[test]
 fn native_pair_tcp_gssapi_uses_zap_actor() {
+    if skip_synthetic_gssapi_test() {
+        return;
+    }
     let port = unused_tcp_port();
     let endpoint = format!("tcp://127.0.0.1:{port}");
     let ctx = Context::new().unwrap();
@@ -1418,6 +1433,39 @@ fn native_socket_options_round_trip() {
     assert_eq!(xpub.get_option_i32(ZMQ_XPUB_VERBOSE).unwrap(), 1);
     assert_eq!(xpub.get_option_i32(ZMQ_XPUB_MANUAL).unwrap(), 1);
     assert_eq!(xpub.get_option_i32(ZMQ_XPUB_NODROP).unwrap(), 1);
+
+    assert_eq!(socket.get_option_i32(ZMQ_NORM_MODE).unwrap(), ZMQ_NORM_CC);
+    assert_eq!(socket.get_option_i32(ZMQ_NORM_BUFFER_SIZE).unwrap(), 2048);
+    assert_eq!(socket.get_option_i32(ZMQ_NORM_SEGMENT_SIZE).unwrap(), 1400);
+    assert_eq!(socket.get_option_i32(ZMQ_NORM_BLOCK_SIZE).unwrap(), 16);
+    assert_eq!(socket.get_option_i32(ZMQ_NORM_NUM_PARITY).unwrap(), 4);
+    assert_eq!(socket.get_option_i32(ZMQ_NORM_NUM_AUTOPARITY).unwrap(), 0);
+    assert_eq!(socket.get_option_i32(ZMQ_NORM_UNICAST_NACK).unwrap(), 0);
+    assert_eq!(socket.get_option_i32(ZMQ_NORM_PUSH).unwrap(), 0);
+    socket.set_option_i32(ZMQ_NORM_MODE, ZMQ_NORM_CCE).unwrap();
+    socket.set_option_i32(ZMQ_NORM_BUFFER_SIZE, 4096).unwrap();
+    socket.set_option_i32(ZMQ_NORM_SEGMENT_SIZE, 1200).unwrap();
+    socket.set_option_i32(ZMQ_NORM_BLOCK_SIZE, 64).unwrap();
+    socket.set_option_i32(ZMQ_NORM_NUM_PARITY, 8).unwrap();
+    socket.set_option_i32(ZMQ_NORM_NUM_AUTOPARITY, 2).unwrap();
+    socket.set_option_i32(ZMQ_NORM_UNICAST_NACK, 1).unwrap();
+    socket.set_option_i32(ZMQ_NORM_PUSH, 1).unwrap();
+    assert_eq!(socket.get_option_i32(ZMQ_NORM_MODE).unwrap(), ZMQ_NORM_CCE);
+    assert_eq!(socket.get_option_i32(ZMQ_NORM_BUFFER_SIZE).unwrap(), 4096);
+    assert_eq!(socket.get_option_i32(ZMQ_NORM_SEGMENT_SIZE).unwrap(), 1200);
+    assert_eq!(socket.get_option_i32(ZMQ_NORM_BLOCK_SIZE).unwrap(), 64);
+    assert_eq!(socket.get_option_i32(ZMQ_NORM_NUM_PARITY).unwrap(), 8);
+    assert_eq!(socket.get_option_i32(ZMQ_NORM_NUM_AUTOPARITY).unwrap(), 2);
+    assert_eq!(socket.get_option_i32(ZMQ_NORM_UNICAST_NACK).unwrap(), 1);
+    assert_eq!(socket.get_option_i32(ZMQ_NORM_PUSH).unwrap(), 1);
+    assert_eq!(
+        socket.set_option_i32(ZMQ_NORM_MODE, 5),
+        Err(Error::InvalidArgument)
+    );
+    assert_eq!(
+        socket.set_option_i32(ZMQ_NORM_BLOCK_SIZE, 256),
+        Err(Error::InvalidArgument)
+    );
 }
 
 #[test]

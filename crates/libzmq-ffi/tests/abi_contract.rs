@@ -12,6 +12,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use zmq::*;
 
+fn skip_synthetic_gssapi_test() -> bool {
+    cfg!(feature = "gssapi") && std::env::var_os("LIBZMQ_TEST_REAL_GSSAPI").is_none()
+}
+
 const ZMQ_HAUSNUMERO: c_int = 156_384_712;
 const ENOTSUP: c_int = ZMQ_HAUSNUMERO + 1;
 const ENOTSOCK: c_int = ZMQ_HAUSNUMERO + 9;
@@ -68,6 +72,14 @@ const ZMQ_GSSAPI_PRINCIPAL: c_int = 63;
 const ZMQ_GSSAPI_SERVICE_PRINCIPAL: c_int = 64;
 const ZMQ_SUBSCRIBE: c_int = 6;
 const ZMQ_XPUB_WELCOME_MSG: c_int = 72;
+const ZMQ_NORM_MODE: c_int = 117;
+const ZMQ_NORM_UNICAST_NACK: c_int = 118;
+const ZMQ_NORM_BUFFER_SIZE: c_int = 119;
+const ZMQ_NORM_SEGMENT_SIZE: c_int = 120;
+const ZMQ_NORM_BLOCK_SIZE: c_int = 121;
+const ZMQ_NORM_NUM_PARITY: c_int = 122;
+const ZMQ_NORM_NUM_AUTOPARITY: c_int = 123;
+const ZMQ_NORM_PUSH: c_int = 124;
 const ZMQ_POLLIN: i16 = 1;
 const ZMQ_POLLOUT: i16 = 2;
 const ZMQ_EVENT_LISTENING: c_int = 0x0008;
@@ -75,6 +87,8 @@ const ZMQ_NULL: c_int = 0;
 const ZMQ_PLAIN: c_int = 1;
 const ZMQ_CURVE: c_int = 2;
 const ZMQ_GSSAPI: c_int = 3;
+const ZMQ_NORM_CC: c_int = 1;
+const ZMQ_NORM_CCE: c_int = 3;
 
 static FREE_CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
 static TIMER_CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -875,6 +889,9 @@ fn pair_tcp_curve_uses_zap_actor_over_c_abi() {
 
 #[test]
 fn pair_tcp_gssapi_round_trip_over_c_abi() {
+    if skip_synthetic_gssapi_test() {
+        return;
+    }
     let ctx = zmq_ctx_new();
     assert!(!ctx.is_null());
     let server = zmq_socket(ctx, ZMQ_PAIR);
@@ -918,6 +935,9 @@ fn pair_tcp_gssapi_round_trip_over_c_abi() {
 
 #[test]
 fn pair_tcp_gssapi_rejects_bad_principal_over_c_abi() {
+    if skip_synthetic_gssapi_test() {
+        return;
+    }
     let ctx = zmq_ctx_new();
     assert!(!ctx.is_null());
     let server = zmq_socket(ctx, ZMQ_PAIR);
@@ -951,6 +971,9 @@ fn pair_tcp_gssapi_rejects_bad_principal_over_c_abi() {
 
 #[test]
 fn pair_tcp_gssapi_uses_zap_actor_over_c_abi() {
+    if skip_synthetic_gssapi_test() {
+        return;
+    }
     let ctx = zmq_ctx_new();
     assert!(!ctx.is_null());
     let zap = zmq_socket(ctx, ZMQ_REP);
@@ -2389,6 +2412,68 @@ fn socket_options_round_trip_over_c_abi() {
         0
     );
     assert_eq!(value, 1);
+
+    value = 0;
+    size = size_of::<c_int>();
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_NORM_MODE,
+            (&mut value as *mut c_int).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(value, ZMQ_NORM_CC);
+    value = ZMQ_NORM_CCE;
+    assert_eq!(
+        zmq_setsockopt(
+            socket,
+            ZMQ_NORM_MODE,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    for (option, new_value, expected) in [
+        (ZMQ_NORM_BUFFER_SIZE, 4096, 4096),
+        (ZMQ_NORM_SEGMENT_SIZE, 1200, 1200),
+        (ZMQ_NORM_BLOCK_SIZE, 64, 64),
+        (ZMQ_NORM_NUM_PARITY, 8, 8),
+        (ZMQ_NORM_NUM_AUTOPARITY, 2, 2),
+        (ZMQ_NORM_UNICAST_NACK, 1, 1),
+        (ZMQ_NORM_PUSH, 1, 1),
+    ] {
+        value = new_value;
+        assert_eq!(
+            zmq_setsockopt(
+                socket,
+                option,
+                (&value as *const c_int).cast(),
+                size_of::<c_int>()
+            ),
+            0
+        );
+        value = 0;
+        size = size_of::<c_int>();
+        assert_eq!(
+            zmq_getsockopt(socket, option, (&mut value as *mut c_int).cast(), &mut size),
+            0
+        );
+        assert_eq!(value, expected);
+    }
+
+    value = 5;
+    assert_eq!(
+        zmq_setsockopt(
+            socket,
+            ZMQ_NORM_MODE,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
 
     value = -1;
     assert_eq!(
