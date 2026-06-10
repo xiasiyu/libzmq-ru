@@ -144,9 +144,7 @@ impl UdpEndpoint {
     }
 
     pub fn bind_addr(&self) -> String {
-        let host = if self.host == "*" {
-            "0.0.0.0"
-        } else if self.multicast_v4().is_some() {
+        let host = if self.host == "*" || self.multicast_v4().is_some() {
             "0.0.0.0"
         } else {
             &self.host

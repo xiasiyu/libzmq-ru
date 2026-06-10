@@ -35,6 +35,14 @@ path = "src/bin/rust_stable_oracle.rs"
 name = "compare-stable-oracles"
 path = "src/bin/compare_stable_oracles.rs"
 
+[[bin]]
+name = "unsafe-report"
+path = "src/bin/unsafe_report.rs"
+
+[[bin]]
+name = "performance-gate"
+path = "src/bin/performance_gate.rs"
+
 [dependencies]
 libzmq-core.workspace = true
 zmq = { package = "libzmq-ffi", path = "../libzmq-ffi" }

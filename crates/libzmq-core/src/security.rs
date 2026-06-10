@@ -6,7 +6,7 @@ const Z85_CHARS: &[u8; 85] =
     b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
 
 pub fn z85_encode(data: &[u8]) -> Result<String> {
-    if data.len() % 4 != 0 {
+    if !data.len().is_multiple_of(4) {
         return Err(Error::InvalidArgument);
     }
     let mut encoded = String::with_capacity(data.len() * 5 / 4);
@@ -23,7 +23,7 @@ pub fn z85_encode(data: &[u8]) -> Result<String> {
 }
 
 pub fn z85_decode(encoded: &str) -> Result<Vec<u8>> {
-    if encoded.len() % 5 != 0 {
+    if !encoded.len().is_multiple_of(5) {
         return Err(Error::InvalidArgument);
     }
     let mut decoded = Vec::with_capacity(encoded.len() * 4 / 5);

@@ -1,3 +1,7 @@
+#![allow(clippy::undocumented_unsafe_blocks)]
+
+// This same-process interop oracle dynamically loads original C++ libzmq symbols.
+
 use std::env;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::mem;

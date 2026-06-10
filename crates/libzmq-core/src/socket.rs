@@ -25,6 +25,7 @@ use std::collections::VecDeque;
 use std::convert::TryFrom;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "wss")]
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
@@ -105,7 +106,8 @@ pub struct Socket {
     #[cfg(feature = "wss")]
     wss: Mutex<WssState>,
     monitor: Mutex<Option<MonitorState>>,
-    last_recv_more: Mutex<bool>,
+    inproc_fast_send_enabled: AtomicBool,
+    last_recv_more: AtomicBool,
     last_recv_routing_id: Mutex<Option<u32>>,
     pattern_state: Mutex<Option<PatternState>>,
 }
@@ -432,7 +434,8 @@ impl Socket {
             #[cfg(feature = "wss")]
             wss: Mutex::new(WssState::default()),
             monitor: Mutex::new(None),
-            last_recv_more: Mutex::new(false),
+            inproc_fast_send_enabled: AtomicBool::new(true),
+            last_recv_more: AtomicBool::new(false),
             last_recv_routing_id: Mutex::new(None),
             pattern_state: Mutex::new(match socket_type {
                 SocketType::Req => Some(PatternState::ReadyToSend),
@@ -622,6 +625,11 @@ impl Socket {
         message.set_more(flags & ZMQ_SNDMORE != 0);
         self.apply_reply_routing_id(&mut message)?;
         self.apply_outgoing_routing_id(&mut message)?;
+        let more = message.more();
+        let Some(message) = self.try_send_inproc_fast(message)? else {
+            self.after_pattern_send(more)?;
+            return Ok(size);
+        };
         if self.has_udp_transport()? {
             self.send_udp_datagram(&message)?;
             self.after_pattern_send(message.more())?;
@@ -700,6 +708,10 @@ impl Socket {
             return Err(Error::NotSupported);
         }
         self.ensure_can_recv_for_pattern()?;
+        if let Some(message) = self.try_recv_inproc_fast()? {
+            self.after_pattern_recv(message.more())?;
+            return Ok(message);
+        }
         if self.has_udp_transport()? {
             let message = self.recv_udp_datagram()?;
             self.after_pattern_recv(message.more())?;
@@ -727,10 +739,7 @@ impl Socket {
         }
         let mut inbox = self.inbox.lock().map_err(|_| Error::InvalidSocket)?;
         let message = inbox.pop_front().ok_or(Error::Again)?;
-        *self
-            .last_recv_more
-            .lock()
-            .map_err(|_| Error::InvalidSocket)? = message.more();
+        self.last_recv_more.store(message.more(), Ordering::Relaxed);
         if message.routing_id() != 0 {
             *self
                 .last_recv_routing_id
@@ -739,6 +748,68 @@ impl Socket {
         }
         self.after_pattern_recv(message.more())?;
         Ok(message)
+    }
+
+    fn try_send_inproc_fast(&self, message: Message) -> Result<Option<Message>> {
+        if !matches!(
+            self.socket_type,
+            SocketType::Pair | SocketType::Push | SocketType::Channel
+        ) {
+            return Ok(Some(message));
+        }
+        if !self.inproc_fast_send_enabled.load(Ordering::Relaxed) {
+            return Ok(Some(message));
+        }
+        let outbox = {
+            let inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
+            if let Some(outbox) = &inproc.direct_outbox {
+                Some(Arc::clone(outbox))
+            } else if let Some(bound_endpoint) = &inproc.bound_endpoint {
+                match self.socket_type {
+                    SocketType::Push => bound_endpoint.next_peer()?,
+                    SocketType::Pair | SocketType::Channel => bound_endpoint.first_peer()?,
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        };
+        let Some(outbox) = outbox else {
+            return Ok(Some(message));
+        };
+        outbox
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .push_back(message);
+        Ok(None)
+    }
+
+    fn try_recv_inproc_fast(&self) -> Result<Option<Message>> {
+        let message = self
+            .inbox
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .pop_front();
+        if let Some(message) = message.as_ref().filter(|message| {
+            message.more()
+                || message.routing_id() != 0
+                || self.last_recv_more.load(Ordering::Relaxed)
+                || matches!(self.socket_type, SocketType::Rep)
+        }) {
+            self.record_recv_metadata(message)?;
+        }
+        Ok(message)
+    }
+
+    fn record_recv_metadata(&self, message: &Message) -> Result<()> {
+        self.last_recv_more.store(message.more(), Ordering::Relaxed);
+        if message.routing_id() != 0 {
+            *self
+                .last_recv_routing_id
+                .lock()
+                .map_err(|_| Error::InvalidSocket)? = Some(message.routing_id());
+        }
+        Ok(())
     }
 
     pub fn subscribe(&self, prefix: &[u8]) -> Result<()> {
@@ -822,11 +893,19 @@ impl Socket {
         let mut options = self.options.lock().map_err(|_| Error::InvalidSocket)?;
         match option {
             ZMQ_LINGER => options.linger = value,
-            ZMQ_SNDHWM if value >= 0 => options.sndhwm = value,
+            ZMQ_SNDHWM if value >= 0 => {
+                options.sndhwm = value;
+                self.inproc_fast_send_enabled
+                    .store(false, Ordering::Relaxed);
+            }
             ZMQ_RCVHWM if value >= 0 => options.rcvhwm = value,
             ZMQ_SNDTIMEO if value >= -1 => options.sndtimeo = value,
             ZMQ_RCVTIMEO if value >= -1 => options.rcvtimeo = value,
-            ZMQ_CONFLATE => options.conflate = value != 0,
+            ZMQ_CONFLATE => {
+                options.conflate = value != 0;
+                self.inproc_fast_send_enabled
+                    .store(false, Ordering::Relaxed);
+            }
             ZMQ_ROUTER_MANDATORY => options.router_mandatory = value != 0,
             ZMQ_ROUTER_HANDOVER => options.router_handover = value != 0,
             ZMQ_REQ_CORRELATE => options.req_correlate = value != 0,
@@ -970,12 +1049,7 @@ impl Socket {
             ZMQ_ZAP_ENFORCE_DOMAIN => Ok(i32::from(options.security.zap_enforce_domain)),
             ZMQ_FD => Ok(-1),
             ZMQ_EVENTS => Ok(self.events()? as i32),
-            ZMQ_RCVMORE => Ok(i32::from(
-                *self
-                    .last_recv_more
-                    .lock()
-                    .map_err(|_| Error::InvalidSocket)?,
-            )),
+            ZMQ_RCVMORE => Ok(i32::from(self.last_recv_more.load(Ordering::Relaxed))),
             ZMQ_THREAD_SAFE => Ok(0),
             _ => Err(Error::InvalidArgument),
         }
@@ -2037,6 +2111,9 @@ impl Socket {
     }
 
     fn ensure_can_send_for_pattern(&self) -> Result<()> {
+        if !matches!(self.socket_type, SocketType::Req | SocketType::Rep) {
+            return Ok(());
+        }
         let state = self
             .pattern_state
             .lock()
@@ -2054,6 +2131,9 @@ impl Socket {
     }
 
     fn after_pattern_send(&self, more: bool) -> Result<()> {
+        if !matches!(self.socket_type, SocketType::Req | SocketType::Rep) {
+            return Ok(());
+        }
         let mut state = self
             .pattern_state
             .lock()
@@ -2078,6 +2158,9 @@ impl Socket {
     }
 
     fn ensure_can_recv_for_pattern(&self) -> Result<()> {
+        if !matches!(self.socket_type, SocketType::Req | SocketType::Rep) {
+            return Ok(());
+        }
         let state = self
             .pattern_state
             .lock()
@@ -2089,6 +2172,9 @@ impl Socket {
     }
 
     fn after_pattern_recv(&self, more: bool) -> Result<()> {
+        if !matches!(self.socket_type, SocketType::Req | SocketType::Rep) {
+            return Ok(());
+        }
         let mut state = self
             .pattern_state
             .lock()

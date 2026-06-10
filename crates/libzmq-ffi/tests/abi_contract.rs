@@ -1,3 +1,8 @@
+#![allow(clippy::undocumented_unsafe_blocks)]
+
+// These C ABI tests intentionally exercise raw-pointer and MaybeUninit boundaries.
+// Production unsafe auditing is enforced by `unsafe-report` against crate source.
+
 use std::ffi::CStr;
 use std::ffi::{c_char, c_int, c_void};
 use std::mem::{align_of, size_of, MaybeUninit};

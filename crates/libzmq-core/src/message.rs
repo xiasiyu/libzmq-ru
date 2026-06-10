@@ -39,6 +39,19 @@ impl MessageData {
         }
     }
 
+    fn from_slice(data: &[u8]) -> Self {
+        if data.len() <= INLINE_CAPACITY {
+            let mut bytes = [0; INLINE_CAPACITY];
+            bytes[..data.len()].copy_from_slice(data);
+            Self::Inline {
+                len: data.len() as u8,
+                bytes,
+            }
+        } else {
+            Self::Heap(data.to_vec())
+        }
+    }
+
     fn as_slice(&self) -> &[u8] {
         match self {
             Self::Inline { len, bytes } => &bytes[..*len as usize],
@@ -88,7 +101,13 @@ impl Message {
     }
 
     pub fn from_slice(data: &[u8]) -> Self {
-        Self::from_vec(data.to_vec())
+        Self {
+            data: MessageData::from_slice(data),
+            more: false,
+            routing_id: 0,
+            group: None,
+            metadata: Vec::new(),
+        }
     }
 
     pub fn data(&self) -> &[u8] {

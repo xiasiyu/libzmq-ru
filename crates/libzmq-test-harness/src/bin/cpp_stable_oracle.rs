@@ -1,3 +1,7 @@
+#![allow(clippy::undocumented_unsafe_blocks)]
+
+// This oracle dynamically loads the original C++ libzmq C ABI for differential tests.
+
 use std::env;
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::mem;

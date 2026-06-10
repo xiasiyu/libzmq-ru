@@ -1,3 +1,8 @@
+// Exported C ABI functions must keep safe `extern "C"` signatures even when they
+// validate and dereference raw C pointers internally.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+#![allow(clippy::arc_with_non_send_sync)]
+
 use libzmq_core::constants::*;
 use libzmq_core::{Context, Error, Message, Socket, SocketType};
 use std::cell::Cell;
@@ -10,7 +15,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 thread_local! {
-    static LAST_ERRNO: Cell<c_int> = Cell::new(0);
+    static LAST_ERRNO: Cell<c_int> = const { Cell::new(0) };
 }
 
 const STR_INVALID_ARGUMENT: &[u8] = b"Invalid argument\0";
@@ -853,13 +858,12 @@ pub extern "C" fn zmq_send(
         return set_error(Error::InvalidArgument);
     }
     let bytes = if len == 0 {
-        Vec::new()
+        &[]
     } else {
         // SAFETY: `buf` was checked non-null for non-zero `len` and is read-only for `len` bytes.
-        unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), len).to_vec() }
+        unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), len) }
     };
-    let mut message = Message::from_vec(bytes);
-    message.set_more(flags & ZMQ_SNDMORE != 0);
+    let message = Message::from_slice(bytes);
     match socket.inner.send(message, flags) {
         Ok(size) => {
             clear_errno();
