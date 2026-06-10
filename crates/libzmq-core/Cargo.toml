@@ -7,6 +7,9 @@ license.workspace = true
 [lib]
 name = "libzmq_core"
 
+[dependencies]
+libzmq-sys.workspace = true
+
 [lints]
 workspace = true
 

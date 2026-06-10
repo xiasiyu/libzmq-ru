@@ -280,66 +280,70 @@ Completion checks:
 
 Status note: Phase 7 completed with C ABI coverage for poll readiness, poller registry APIs, `ZMQ_FD`, `ZMQ_EVENTS`, monitor setup and inproc event delivery, proxy one-shot forwarding, timers, atomic counters, stopwatch helpers, and thread helpers. Monitor event generation currently covers inproc lifecycle events; later transport phases will extend it for TCP/IPC and handshake events.
 
-## Phase 8: Platform and Sys Layer [ ]
+## Phase 8: Platform and Sys Layer [!]
 
 Goal: support Linux, macOS, and Windows from the start.
 
-- [ ] Implement Unix fd RAII.
-- [ ] Implement Windows socket RAII.
-- [ ] Implement Unix nonblocking setup.
-- [ ] Implement Windows nonblocking setup.
-- [ ] Implement Unix socketpair or pipe signaler.
-- [ ] Implement Windows signaler equivalent.
-- [ ] Implement epoll backend where available.
-- [ ] Implement kqueue backend where available.
-- [ ] Implement poll backend.
-- [ ] Implement select backend.
-- [ ] Implement Windows poll/select backend.
-- [ ] Implement sockaddr wrappers.
-- [ ] Implement TCP socket syscalls.
-- [ ] Implement IPC socket syscalls.
-- [ ] Implement Windows DLL export validation.
+- [x] Implement Unix fd RAII.
+- [x] Implement Windows socket RAII.
+- [x] Implement Unix nonblocking setup.
+- [x] Implement Windows nonblocking setup.
+- [x] Implement Unix socketpair or pipe signaler.
+- [x] Implement Windows signaler equivalent.
+- [x] Implement epoll backend where available.
+- [x] Implement kqueue backend where available.
+- [x] Implement poll backend.
+- [x] Implement select backend.
+- [x] Implement Windows poll/select backend.
+- [x] Implement sockaddr wrappers.
+- [x] Implement TCP socket syscalls.
+- [x] Implement IPC socket syscalls.
+- [!] Implement Windows DLL export validation.
 
 Completion checks:
 
-- [ ] `cargo fmt --all`
-- [ ] `cargo test --workspace`
-- [ ] Linux build passes.
-- [ ] macOS build passes.
-- [ ] Windows build passes.
-- [ ] Business logic contains no direct syscall FFI.
+- [x] `cargo fmt --all`
+- [x] `cargo test --workspace`
+- [x] Linux build passes.
+- [x] macOS build passes.
+- [x] Windows build passes.
+- [x] Business logic contains no direct syscall FFI.
 
-## Phase 9: TCP, IPC, ZMTP [ ]
+Status note: Phase 8 sys-layer implementation is in place with `libzmq-sys` owning OS handle RAII, nonblocking setup, signalers, poll/select wrappers, native epoll/kqueue constructors where available, sockaddr wrappers, TCP/IPC socket syscall wrappers, TCP listener/connecter wrappers, and Unix IPC listener/connecter wrappers. macOS workspace tests pass, Linux and Windows workspace `cargo check` targets pass through rustup, and syscall-related imports are absent outside `libzmq-sys`. Windows DLL export validation still requires a Windows-capable toolchain such as `dumpbin`.
+
+## Phase 9: TCP, IPC, ZMTP [x]
 
 Goal: implement cross-process and cross-implementation messaging.
 
-- [ ] Implement TCP address parser.
-- [ ] Implement TCP listener.
-- [ ] Implement TCP connecter.
-- [ ] Implement TCP reconnect and backoff.
-- [ ] Implement IPC address parser.
-- [ ] Implement IPC listener.
-- [ ] Implement IPC connecter.
-- [ ] Implement stream engine base.
-- [ ] Implement ZMTP greeting.
-- [ ] Implement ZMTP v1 encoder and decoder.
-- [ ] Implement ZMTP v2 encoder and decoder.
-- [ ] Implement ZMTP v3 encoder and decoder.
-- [ ] Implement ZMTP v3.1 metadata.
-- [ ] Implement raw engine.
-- [ ] Add wire-level tests using ordinary TCP sockets.
+- [x] Implement TCP address parser.
+- [x] Implement TCP listener.
+- [x] Implement TCP connecter.
+- [x] Implement TCP reconnect and backoff.
+- [x] Implement IPC address parser.
+- [x] Implement IPC listener.
+- [x] Implement IPC connecter.
+- [x] Implement stream engine base.
+- [x] Implement ZMTP greeting.
+- [x] Implement ZMTP v1 encoder and decoder.
+- [x] Implement ZMTP v2 encoder and decoder.
+- [x] Implement ZMTP v3 encoder and decoder.
+- [x] Implement ZMTP v3.1 metadata.
+- [x] Implement raw engine.
+- [x] Add wire-level tests using ordinary TCP sockets.
 
 Completion checks:
 
-- [ ] `cargo fmt --all`
-- [ ] `cargo test --workspace`
-- [ ] PAIR tcp tests pass.
-- [ ] REQ/REP tcp tests pass.
-- [ ] PUSH/PULL tcp tests pass.
-- [ ] IPC tests pass on supported platforms.
-- [ ] C++ client to Rust server interop passes.
-- [ ] Rust client to C++ server interop passes.
-- [ ] Wire-level ZMTP tests pass.
+- [x] `cargo fmt --all`
+- [x] `cargo test --workspace`
+- [x] PAIR tcp tests pass.
+- [x] REQ/REP tcp tests pass.
+- [x] PUSH/PULL tcp tests pass.
+- [x] IPC tests pass on supported platforms.
+- [x] C++ client to Rust server interop passes.
+- [x] Rust client to C++ server interop passes.
+- [x] Wire-level ZMTP tests pass.
+
+Status note: Phase 9 completed with TCP/IPC endpoint parsing, TCP listener/connecter wrappers, Unix IPC listener/connecter wrappers, TCP reconnect/backoff retries, ZMTP NULL greeting encode/decode, ZMTP v1/v2/v3 frame encode/decode, ZMTP v3.1 READY metadata encode/decode, raw STREAM-over-TCP bytes, ordinary TCP wire-level greeting exchange, and socket-level PAIR TCP/IPC, PUSH/PULL TCP, and REQ/REP TCP round trips through native and C ABI entry points. Process-isolated and same-process original-C++ TCP interop now pass in both directions after fixing greeting signature bytes, accepted stream blocking mode, and the greeting exchange order.
 
 ## Phase 10: Security [ ]
 

@@ -70,6 +70,17 @@ type ZmqFd = usize;
 #[cfg(not(windows))]
 type ZmqFd = c_int;
 
+fn invalid_zmq_fd() -> ZmqFd {
+    #[cfg(windows)]
+    {
+        usize::MAX
+    }
+    #[cfg(not(windows))]
+    {
+        -1
+    }
+}
+
 struct OpaqueContext {
     inner: Context,
 }
@@ -1923,7 +1934,7 @@ pub extern "C" fn zmq_poller_fd(_poller: *mut c_void, fd: *mut ZmqFd) -> c_int {
         return set_error(error);
     }
     // SAFETY: `fd` is non-null and writable.
-    unsafe { *fd = -1 as ZmqFd };
+    unsafe { *fd = invalid_zmq_fd() };
     clear_errno();
     0
 }

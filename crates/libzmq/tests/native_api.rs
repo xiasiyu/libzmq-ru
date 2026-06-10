@@ -4,6 +4,8 @@ use libzmq::{
     ZMQ_ROUTER_MANDATORY, ZMQ_SNDHWM, ZMQ_SNDMORE, ZMQ_TYPE, ZMQ_XPUB_MANUAL, ZMQ_XPUB_NODROP,
     ZMQ_XPUB_VERBOSE, ZMQ_XPUB_WELCOME_MSG,
 };
+use std::io::{Read, Write};
+use std::net::TcpListener;
 
 #[test]
 fn native_version_matches_c_abi_contract() {
@@ -73,13 +75,149 @@ fn native_unimplemented_socket_operations_are_explicit() {
     let ctx = Context::new().unwrap();
     let socket = ctx.socket(SocketType::Pair).unwrap();
 
-    assert_eq!(socket.bind("tcp://127.0.0.1:1"), Err(Error::NotSupported));
+    assert_eq!(socket.bind("udp://127.0.0.1:1"), Err(Error::NotSupported));
     assert_eq!(
-        socket.connect("tcp://127.0.0.1:1"),
+        socket.connect("udp://127.0.0.1:1"),
         Err(Error::NotSupported)
     );
     assert_eq!(socket.send("hello"), Err(Error::Again));
     assert_eq!(socket.recv(), Err(Error::Again));
+}
+
+#[test]
+fn native_pair_tcp_round_trip() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    assert_eq!(client.send("hello").unwrap(), 5);
+    let received = server.recv().unwrap();
+    assert_eq!(received.data(), b"hello");
+
+    assert_eq!(server.send("world").unwrap(), 5);
+    let received = client.recv().unwrap();
+    assert_eq!(received.data(), b"world");
+}
+
+#[test]
+fn native_pair_tcp_connect_before_bind_reconnects() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    client.connect(&endpoint).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let mut sent = false;
+    for _ in 0..20 {
+        match client.send("hello") {
+            Ok(5) => {
+                sent = true;
+                break;
+            }
+            Err(Error::Again) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            other => panic!("unexpected send result: {other:?}"),
+        }
+    }
+    assert!(sent, "client did not reconnect before retry deadline");
+    let received = server.recv().unwrap();
+    assert_eq!(received.data(), b"hello");
+}
+
+#[test]
+fn native_push_pull_tcp_round_trip() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let pull = ctx.socket(SocketType::Pull).unwrap();
+    let push = ctx.socket(SocketType::Push).unwrap();
+
+    pull.bind(&endpoint).unwrap();
+    push.connect(&endpoint).unwrap();
+
+    assert_eq!(push.send("job").unwrap(), 3);
+    let received = pull.recv().unwrap();
+    assert_eq!(received.data(), b"job");
+}
+
+#[test]
+fn native_req_rep_tcp_round_trip() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let rep = ctx.socket(SocketType::Rep).unwrap();
+    let req = ctx.socket(SocketType::Req).unwrap();
+
+    rep.bind(&endpoint).unwrap();
+    req.connect(&endpoint).unwrap();
+
+    assert_eq!(req.send("question").unwrap(), 8);
+    let received = rep.recv().unwrap();
+    assert_eq!(received.data(), b"question");
+    assert_eq!(rep.send("answer").unwrap(), 6);
+    let received = req.recv().unwrap();
+    assert_eq!(received.data(), b"answer");
+}
+
+#[test]
+fn native_stream_tcp_uses_raw_bytes() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("tcp://{}", listener.local_addr().unwrap());
+    let peer = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 3];
+        stream.read_exact(&mut buffer).unwrap();
+        assert_eq!(&buffer, b"raw");
+        stream.write_all(b"ack").unwrap();
+    });
+
+    let ctx = Context::new().unwrap();
+    let stream = ctx.socket(SocketType::Stream).unwrap();
+    stream.connect(&endpoint).unwrap();
+    assert_eq!(stream.send("raw").unwrap(), 3);
+    let received = stream.recv().unwrap();
+    assert_eq!(received.data(), b"ack");
+    peer.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn native_pair_ipc_round_trip() {
+    let path = std::env::temp_dir().join(format!(
+        "libzmq-native-ipc-{}-round-trip.sock",
+        std::process::id()
+    ));
+    let endpoint = format!("ipc://{}", path.display());
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    assert_eq!(client.send("hello").unwrap(), 5);
+    let received = server.recv().unwrap();
+    assert_eq!(received.data(), b"hello");
+
+    assert_eq!(server.send("world").unwrap(), 5);
+    let received = client.recv().unwrap();
+    assert_eq!(received.data(), b"world");
+    let _ = std::fs::remove_file(path);
+}
+
+fn unused_tcp_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 #[test]

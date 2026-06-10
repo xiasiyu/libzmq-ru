@@ -2,10 +2,15 @@ use crate::constants::*;
 use crate::context::{
     ContextShared, InprocEndpoint, MessageQueue, SubscriptionSet, WelcomeMessage,
 };
+use crate::transport::{IpcEndpoint, TcpEndpoint, ZmtpFrame, ZmtpGreeting, ZmtpMetadata};
 use crate::{Error, Message, Result};
+use libzmq_sys::ipc::{IpcListenerHandle, IpcStreamHandle};
+use libzmq_sys::{TcpListenerHandle, TcpStreamHandle};
 use std::collections::VecDeque;
 use std::convert::TryFrom;
+use std::io;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +79,8 @@ pub struct Socket {
     subscriptions: SubscriptionSet,
     xpub_welcome: WelcomeMessage,
     inproc: Mutex<InprocState>,
+    tcp: Mutex<TcpState>,
+    ipc: Mutex<IpcState>,
     monitor: Mutex<Option<MonitorState>>,
     last_recv_more: Mutex<bool>,
     last_recv_routing_id: Mutex<Option<u32>>,
@@ -92,6 +99,29 @@ struct InprocState {
     connected_endpoint: Option<String>,
     bound_endpoint_name: Option<String>,
     bound_endpoint: Option<Arc<InprocEndpoint>>,
+}
+
+#[derive(Debug, Default)]
+struct TcpState {
+    listener: Option<TcpListenerHandle>,
+    stream: Option<TcpStreamHandle>,
+    bound_endpoint: Option<TcpEndpoint>,
+    connected_endpoint: Option<TcpEndpoint>,
+    next_reconnect_at: Option<Instant>,
+    handshake_started: bool,
+    peer_greeting_done: bool,
+    peer_ready: bool,
+}
+
+#[derive(Debug, Default)]
+struct IpcState {
+    listener: Option<IpcListenerHandle>,
+    stream: Option<IpcStreamHandle>,
+    bound_endpoint: Option<IpcEndpoint>,
+    connected_endpoint: Option<IpcEndpoint>,
+    handshake_started: bool,
+    peer_greeting_done: bool,
+    peer_ready: bool,
 }
 
 #[derive(Debug)]
@@ -150,6 +180,8 @@ impl Socket {
             subscriptions: Arc::new(Mutex::new(Vec::new())),
             xpub_welcome: Arc::new(Mutex::new(None)),
             inproc: Mutex::new(InprocState::default()),
+            tcp: Mutex::new(TcpState::default()),
+            ipc: Mutex::new(IpcState::default()),
             monitor: Mutex::new(None),
             last_recv_more: Mutex::new(false),
             last_recv_routing_id: Mutex::new(None),
@@ -170,6 +202,12 @@ impl Socket {
     }
 
     pub fn bind(&self, endpoint: &str) -> Result<()> {
+        if endpoint.starts_with("tcp://") {
+            return self.bind_tcp(endpoint);
+        }
+        if endpoint.starts_with("ipc://") {
+            return self.bind_ipc(endpoint);
+        }
         let endpoint_name = endpoint
             .strip_prefix("inproc://")
             .ok_or(Error::NotSupported)?;
@@ -191,6 +229,12 @@ impl Socket {
     }
 
     pub fn unbind(&self, endpoint: &str) -> Result<()> {
+        if endpoint.starts_with("tcp://") {
+            return self.unbind_tcp(endpoint);
+        }
+        if endpoint.starts_with("ipc://") {
+            return self.unbind_ipc(endpoint);
+        }
         let endpoint_name = endpoint
             .strip_prefix("inproc://")
             .ok_or(Error::NotSupported)?;
@@ -208,6 +252,12 @@ impl Socket {
     }
 
     pub fn connect(&self, endpoint: &str) -> Result<()> {
+        if endpoint.starts_with("tcp://") {
+            return self.connect_tcp(endpoint);
+        }
+        if endpoint.starts_with("ipc://") {
+            return self.connect_ipc(endpoint);
+        }
         let endpoint_name = endpoint
             .strip_prefix("inproc://")
             .ok_or(Error::NotSupported)?;
@@ -228,6 +278,12 @@ impl Socket {
     }
 
     pub fn disconnect(&self, endpoint: &str) -> Result<()> {
+        if endpoint.starts_with("tcp://") {
+            return self.disconnect_tcp(endpoint);
+        }
+        if endpoint.starts_with("ipc://") {
+            return self.disconnect_ipc(endpoint);
+        }
         let endpoint_name = endpoint
             .strip_prefix("inproc://")
             .ok_or(Error::NotSupported)?;
@@ -281,6 +337,16 @@ impl Socket {
         message.set_more(flags & ZMQ_SNDMORE != 0);
         self.apply_reply_routing_id(&mut message)?;
         self.apply_outgoing_routing_id(&mut message)?;
+        if self.has_tcp_transport()? {
+            self.send_tcp_frame(message.data())?;
+            self.after_pattern_send()?;
+            return Ok(size);
+        }
+        if self.has_ipc_transport()? {
+            self.send_ipc_frame(message.data())?;
+            self.after_pattern_send()?;
+            return Ok(size);
+        }
         let outboxes = self.resolve_outboxes(&message)?;
         if outboxes.is_empty() {
             if matches!(self.socket_type, SocketType::Pub | SocketType::Xpub) {
@@ -331,6 +397,16 @@ impl Socket {
             return Err(Error::NotSupported);
         }
         self.ensure_can_recv_for_pattern()?;
+        if self.has_tcp_transport()? {
+            let message = Message::from_vec(self.recv_tcp_frame()?);
+            self.after_pattern_recv()?;
+            return Ok(message);
+        }
+        if self.has_ipc_transport()? {
+            let message = Message::from_vec(self.recv_ipc_frame()?);
+            self.after_pattern_recv()?;
+            return Ok(message);
+        }
         let mut inbox = self.inbox.lock().map_err(|_| Error::InvalidSocket)?;
         let message = inbox.pop_front().ok_or(Error::Again)?;
         *self
@@ -499,6 +575,331 @@ impl Socket {
         Err(Error::Again)
     }
 
+    fn bind_tcp(&self, endpoint: &str) -> Result<()> {
+        if !self.supports_stream_transport() {
+            return Err(Error::NotSupported);
+        }
+        let parsed = TcpEndpoint::parse(endpoint)?;
+        let listener = TcpListenerHandle::bind(parsed.bind_addr()).map_err(map_io_error)?;
+        listener.set_nonblocking(true).map_err(map_io_error)?;
+        let mut tcp = self.tcp.lock().map_err(|_| Error::InvalidSocket)?;
+        tcp.listener = Some(listener);
+        tcp.bound_endpoint = Some(parsed);
+        tcp.handshake_started = false;
+        tcp.peer_greeting_done = false;
+        tcp.peer_ready = false;
+        self.emit_monitor_event(ZMQ_EVENT_LISTENING, 0, endpoint)?;
+        Ok(())
+    }
+
+    fn unbind_tcp(&self, endpoint: &str) -> Result<()> {
+        let parsed = TcpEndpoint::parse(endpoint)?;
+        let mut tcp = self.tcp.lock().map_err(|_| Error::InvalidSocket)?;
+        if tcp.bound_endpoint.as_ref() != Some(&parsed) {
+            return Err(Error::InvalidArgument);
+        }
+        tcp.listener = None;
+        tcp.stream = None;
+        tcp.bound_endpoint = None;
+        tcp.handshake_started = false;
+        tcp.peer_greeting_done = false;
+        tcp.peer_ready = false;
+        self.emit_monitor_event(ZMQ_EVENT_CLOSED, 0, endpoint)?;
+        Ok(())
+    }
+
+    fn connect_tcp(&self, endpoint: &str) -> Result<()> {
+        if !self.supports_stream_transport() {
+            return Err(Error::NotSupported);
+        }
+        let parsed = TcpEndpoint::parse(endpoint)?;
+        let connect_addr = parsed.connect_addr()?;
+        let stream = match TcpStreamHandle::connect(connect_addr) {
+            Ok(stream) => {
+                configure_tcp_stream(&stream)?;
+                Some(stream)
+            }
+            Err(error) if is_reconnectable_tcp_error(&error) => None,
+            Err(error) => return Err(map_io_error(error)),
+        };
+        let mut tcp = self.tcp.lock().map_err(|_| Error::InvalidSocket)?;
+        tcp.stream = stream;
+        tcp.connected_endpoint = Some(parsed);
+        tcp.next_reconnect_at = tcp
+            .stream
+            .is_none()
+            .then(|| Instant::now() + Duration::from_millis(100));
+        tcp.handshake_started = false;
+        tcp.peer_greeting_done = false;
+        tcp.peer_ready = false;
+        self.emit_monitor_event(ZMQ_EVENT_CONNECTED, 0, endpoint)?;
+        Ok(())
+    }
+
+    fn disconnect_tcp(&self, endpoint: &str) -> Result<()> {
+        let parsed = TcpEndpoint::parse(endpoint)?;
+        let mut tcp = self.tcp.lock().map_err(|_| Error::InvalidSocket)?;
+        if tcp.connected_endpoint.as_ref() != Some(&parsed) {
+            return Err(Error::InvalidArgument);
+        }
+        tcp.stream = None;
+        tcp.connected_endpoint = None;
+        tcp.next_reconnect_at = None;
+        tcp.handshake_started = false;
+        tcp.peer_greeting_done = false;
+        tcp.peer_ready = false;
+        self.emit_monitor_event(ZMQ_EVENT_DISCONNECTED, 0, endpoint)?;
+        Ok(())
+    }
+
+    fn has_tcp_transport(&self) -> Result<bool> {
+        let tcp = self.tcp.lock().map_err(|_| Error::InvalidSocket)?;
+        Ok(tcp.stream.is_some() || tcp.listener.is_some() || tcp.connected_endpoint.is_some())
+    }
+
+    fn ensure_tcp_stream(tcp: &mut TcpState) -> Result<&mut TcpStreamHandle> {
+        if tcp.stream.is_none() {
+            if let Some(endpoint) = tcp.connected_endpoint.as_ref() {
+                if tcp
+                    .next_reconnect_at
+                    .is_some_and(|deadline| Instant::now() < deadline)
+                {
+                    return Err(Error::Again);
+                }
+                match TcpStreamHandle::connect(endpoint.connect_addr()?) {
+                    Ok(stream) => {
+                        configure_tcp_stream(&stream)?;
+                        tcp.stream = Some(stream);
+                        tcp.next_reconnect_at = None;
+                        tcp.handshake_started = false;
+                        tcp.peer_greeting_done = false;
+                        tcp.peer_ready = false;
+                    }
+                    Err(error) if is_reconnectable_tcp_error(&error) => {
+                        tcp.next_reconnect_at = Some(Instant::now() + Duration::from_millis(100));
+                        return Err(Error::Again);
+                    }
+                    Err(error) => return Err(map_io_error(error)),
+                }
+            } else {
+                let listener = tcp.listener.as_ref().ok_or(Error::Again)?;
+                match listener.accept() {
+                    Ok(stream) => {
+                        configure_tcp_stream(&stream)?;
+                        tcp.stream = Some(stream);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        return Err(Error::Again)
+                    }
+                    Err(error) => return Err(map_io_error(error)),
+                }
+            }
+        }
+        tcp.stream.as_mut().ok_or(Error::Again)
+    }
+
+    fn send_tcp_frame(&self, data: &[u8]) -> Result<()> {
+        let mut tcp = self.tcp.lock().map_err(|_| Error::InvalidSocket)?;
+        Self::ensure_tcp_stream(&mut tcp)?;
+        if self.socket_type == SocketType::Stream {
+            let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
+            return stream.write_all(data).map_err(map_io_error);
+        }
+        if !tcp.handshake_started {
+            let as_server = tcp.bound_endpoint.is_some();
+            let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
+            tcp.peer_greeting_done = write_zmtp_handshake_tcp(stream, self.socket_type, as_server)?;
+            tcp.handshake_started = true;
+        }
+        let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
+        stream
+            .write_all(&ZmtpFrame::message(data.to_vec()).encode_v3())
+            .map_err(map_io_error)
+    }
+
+    fn recv_tcp_frame(&self) -> Result<Vec<u8>> {
+        let mut tcp = self.tcp.lock().map_err(|_| Error::InvalidSocket)?;
+        Self::ensure_tcp_stream(&mut tcp)?;
+        if self.socket_type == SocketType::Stream {
+            let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
+            return read_raw_tcp(stream);
+        }
+        if !tcp.handshake_started {
+            let as_server = tcp.bound_endpoint.is_some();
+            let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
+            tcp.peer_greeting_done = write_zmtp_handshake_tcp(stream, self.socket_type, as_server)?;
+            tcp.handshake_started = true;
+        }
+        if !tcp.peer_greeting_done {
+            let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
+            read_zmtp_greeting_tcp(stream)?;
+            tcp.peer_greeting_done = true;
+        }
+        if !tcp.peer_ready {
+            let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
+            read_zmtp_peer_ready_tcp(stream)?;
+            tcp.peer_ready = true;
+        }
+        loop {
+            let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
+            let frame = read_zmtp_frame_tcp(stream)?;
+            if !frame.command_frame() {
+                return Ok(frame.body().to_vec());
+            }
+        }
+    }
+
+    fn bind_ipc(&self, endpoint: &str) -> Result<()> {
+        if !self.supports_stream_transport() {
+            return Err(Error::NotSupported);
+        }
+        let parsed = IpcEndpoint::parse(endpoint)?;
+        let listener = IpcListenerHandle::bind(parsed.path()).map_err(map_io_error)?;
+        listener.set_nonblocking(true).map_err(map_io_error)?;
+        let mut ipc = self.ipc.lock().map_err(|_| Error::InvalidSocket)?;
+        ipc.listener = Some(listener);
+        ipc.bound_endpoint = Some(parsed);
+        ipc.handshake_started = false;
+        ipc.peer_greeting_done = false;
+        ipc.peer_ready = false;
+        self.emit_monitor_event(ZMQ_EVENT_LISTENING, 0, endpoint)?;
+        Ok(())
+    }
+
+    fn unbind_ipc(&self, endpoint: &str) -> Result<()> {
+        let parsed = IpcEndpoint::parse(endpoint)?;
+        let mut ipc = self.ipc.lock().map_err(|_| Error::InvalidSocket)?;
+        if ipc.bound_endpoint.as_ref() != Some(&parsed) {
+            return Err(Error::InvalidArgument);
+        }
+        ipc.listener = None;
+        ipc.stream = None;
+        ipc.bound_endpoint = None;
+        ipc.handshake_started = false;
+        ipc.peer_greeting_done = false;
+        ipc.peer_ready = false;
+        let _ = std::fs::remove_file(parsed.path());
+        self.emit_monitor_event(ZMQ_EVENT_CLOSED, 0, endpoint)?;
+        Ok(())
+    }
+
+    fn connect_ipc(&self, endpoint: &str) -> Result<()> {
+        if !self.supports_stream_transport() {
+            return Err(Error::NotSupported);
+        }
+        let parsed = IpcEndpoint::parse(endpoint)?;
+        let stream = IpcStreamHandle::connect(parsed.path()).map_err(map_io_error)?;
+        configure_ipc_stream(&stream)?;
+        let mut ipc = self.ipc.lock().map_err(|_| Error::InvalidSocket)?;
+        ipc.stream = Some(stream);
+        ipc.connected_endpoint = Some(parsed);
+        ipc.handshake_started = false;
+        ipc.peer_greeting_done = false;
+        ipc.peer_ready = false;
+        self.emit_monitor_event(ZMQ_EVENT_CONNECTED, 0, endpoint)?;
+        Ok(())
+    }
+
+    fn disconnect_ipc(&self, endpoint: &str) -> Result<()> {
+        let parsed = IpcEndpoint::parse(endpoint)?;
+        let mut ipc = self.ipc.lock().map_err(|_| Error::InvalidSocket)?;
+        if ipc.connected_endpoint.as_ref() != Some(&parsed) {
+            return Err(Error::InvalidArgument);
+        }
+        ipc.stream = None;
+        ipc.connected_endpoint = None;
+        ipc.handshake_started = false;
+        ipc.peer_greeting_done = false;
+        ipc.peer_ready = false;
+        self.emit_monitor_event(ZMQ_EVENT_DISCONNECTED, 0, endpoint)?;
+        Ok(())
+    }
+
+    fn has_ipc_transport(&self) -> Result<bool> {
+        let ipc = self.ipc.lock().map_err(|_| Error::InvalidSocket)?;
+        Ok(ipc.stream.is_some() || ipc.listener.is_some())
+    }
+
+    fn supports_stream_transport(&self) -> bool {
+        matches!(
+            self.socket_type,
+            SocketType::Pair
+                | SocketType::Push
+                | SocketType::Pull
+                | SocketType::Req
+                | SocketType::Rep
+                | SocketType::Stream
+        )
+    }
+
+    fn ensure_ipc_stream(ipc: &mut IpcState) -> Result<&mut IpcStreamHandle> {
+        if ipc.stream.is_none() {
+            let listener = ipc.listener.as_ref().ok_or(Error::Again)?;
+            match listener.accept() {
+                Ok(stream) => {
+                    configure_ipc_stream(&stream)?;
+                    ipc.stream = Some(stream);
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    return Err(Error::Again)
+                }
+                Err(error) => return Err(map_io_error(error)),
+            }
+        }
+        ipc.stream.as_mut().ok_or(Error::Again)
+    }
+
+    fn send_ipc_frame(&self, data: &[u8]) -> Result<()> {
+        let mut ipc = self.ipc.lock().map_err(|_| Error::InvalidSocket)?;
+        Self::ensure_ipc_stream(&mut ipc)?;
+        if self.socket_type == SocketType::Stream {
+            let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
+            return stream.write_all(data).map_err(map_io_error);
+        }
+        if !ipc.handshake_started {
+            let as_server = ipc.bound_endpoint.is_some();
+            let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
+            ipc.peer_greeting_done = write_zmtp_handshake_ipc(stream, self.socket_type, as_server)?;
+            ipc.handshake_started = true;
+        }
+        let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
+        stream
+            .write_all(&ZmtpFrame::message(data.to_vec()).encode_v3())
+            .map_err(map_io_error)
+    }
+
+    fn recv_ipc_frame(&self) -> Result<Vec<u8>> {
+        let mut ipc = self.ipc.lock().map_err(|_| Error::InvalidSocket)?;
+        Self::ensure_ipc_stream(&mut ipc)?;
+        if self.socket_type == SocketType::Stream {
+            let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
+            return read_raw_ipc(stream);
+        }
+        if !ipc.handshake_started {
+            let as_server = ipc.bound_endpoint.is_some();
+            let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
+            ipc.peer_greeting_done = write_zmtp_handshake_ipc(stream, self.socket_type, as_server)?;
+            ipc.handshake_started = true;
+        }
+        if !ipc.peer_greeting_done {
+            let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
+            read_zmtp_greeting_ipc(stream)?;
+            ipc.peer_greeting_done = true;
+        }
+        if !ipc.peer_ready {
+            let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
+            read_zmtp_peer_ready_ipc(stream)?;
+            ipc.peer_ready = true;
+        }
+        loop {
+            let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
+            let frame = read_zmtp_frame_ipc(stream)?;
+            if !frame.command_frame() {
+                return Ok(frame.body().to_vec());
+            }
+        }
+    }
+
     fn emit_monitor_event(&self, event: i32, value: i32, endpoint: &str) -> Result<()> {
         let Some(monitor) = self
             .monitor
@@ -657,5 +1058,283 @@ impl Socket {
             None => {}
         }
         Ok(())
+    }
+}
+
+fn configure_tcp_stream(stream: &TcpStreamHandle) -> Result<()> {
+    stream.set_nonblocking(false).map_err(map_io_error)?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(1_000)))
+        .map_err(map_io_error)?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(1_000)))
+        .map_err(map_io_error)
+}
+
+fn configure_ipc_stream(stream: &IpcStreamHandle) -> Result<()> {
+    stream.set_nonblocking(false).map_err(map_io_error)?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(1_000)))
+        .map_err(map_io_error)?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(1_000)))
+        .map_err(map_io_error)
+}
+
+fn read_raw_tcp(stream: &mut TcpStreamHandle) -> Result<Vec<u8>> {
+    let mut buffer = vec![0u8; 8192];
+    let size = stream.read(&mut buffer).map_err(map_io_error)?;
+    if size == 0 {
+        return Err(Error::Again);
+    }
+    buffer.truncate(size);
+    Ok(buffer)
+}
+
+fn read_raw_ipc(stream: &mut IpcStreamHandle) -> Result<Vec<u8>> {
+    let mut buffer = vec![0u8; 8192];
+    let size = stream.read(&mut buffer).map_err(map_io_error)?;
+    if size == 0 {
+        return Err(Error::Again);
+    }
+    buffer.truncate(size);
+    Ok(buffer)
+}
+
+fn write_zmtp_handshake_tcp(
+    stream: &mut TcpStreamHandle,
+    socket_type: SocketType,
+    as_server: bool,
+) -> Result<bool> {
+    let greeting = if as_server {
+        ZmtpGreeting::null_server()
+    } else {
+        ZmtpGreeting::null_client()
+    };
+    if as_server {
+        stream.set_read_timeout(None).map_err(map_io_error)?;
+    }
+    let greeting = greeting.encode();
+    stream.write_all(&greeting[..10]).map_err(map_io_error)?;
+    let peer_prefix_done = match read_zmtp_peer_greeting_prefix_tcp(stream) {
+        Ok(done) => done,
+        Err(Error::Again) => false,
+        Err(error) => return Err(error),
+    };
+    stream.write_all(&greeting[10..]).map_err(map_io_error)?;
+    if peer_prefix_done {
+        read_zmtp_greeting_tail_tcp(stream)?;
+    }
+    stream
+        .write_all(&ZmtpFrame::command(ready_command_body(socket_type)).encode_v3())
+        .map_err(map_io_error)?;
+    if as_server {
+        stream
+            .set_read_timeout(Some(Duration::from_millis(1_000)))
+            .map_err(map_io_error)?;
+    }
+    Ok(peer_prefix_done)
+}
+
+fn read_zmtp_peer_ready_tcp(stream: &mut TcpStreamHandle) -> Result<()> {
+    loop {
+        let frame = read_zmtp_frame_tcp(stream)?;
+        if frame.command_frame() {
+            let _metadata = ZmtpMetadata::decode_ready(frame.body())?;
+            return Ok(());
+        }
+    }
+}
+
+fn read_zmtp_greeting_tcp(stream: &mut TcpStreamHandle) -> Result<()> {
+    let mut greeting = [0u8; 64];
+    stream.read_exact(&mut greeting).map_err(map_io_error)?;
+    ZmtpGreeting::decode(&greeting).map(|_| ())
+}
+
+fn read_zmtp_greeting_tail_tcp(stream: &mut TcpStreamHandle) -> Result<()> {
+    let mut remainder = [0u8; 54];
+    stream.read_exact(&mut remainder).map_err(map_io_error)
+}
+
+fn read_zmtp_peer_greeting_prefix_tcp(stream: &mut TcpStreamHandle) -> Result<bool> {
+    let mut prefix = [0u8; 10];
+    stream.read_exact(&mut prefix).map_err(map_io_error)?;
+    if prefix[0] == 0xFF && prefix[9] == 0x7F {
+        return Ok(true);
+    }
+    if prefix[0] == 3 && prefix[2..6] == *b"NULL" {
+        return Ok(true);
+    }
+    Err(Error::InvalidArgument)
+}
+
+fn read_zmtp_frame_tcp(stream: &mut TcpStreamHandle) -> Result<ZmtpFrame> {
+    let encoded = read_zmtp_frame_bytes_tcp(stream)?;
+    ZmtpFrame::decode_v3(&encoded)
+}
+
+fn read_zmtp_frame_bytes_tcp(stream: &mut TcpStreamHandle) -> Result<Vec<u8>> {
+    let mut flags = [0u8; 1];
+    stream.read_exact(&mut flags).map_err(map_io_error)?;
+    let long = flags[0] & 0x02 != 0;
+    let body_len = if long {
+        let mut len = [0u8; 8];
+        stream.read_exact(&mut len).map_err(map_io_error)?;
+        u64::from_be_bytes(len) as usize
+    } else {
+        let mut len = [0u8; 1];
+        stream.read_exact(&mut len).map_err(map_io_error)?;
+        len[0] as usize
+    };
+    let mut encoded = Vec::with_capacity(if long { 9 } else { 2 } + body_len);
+    encoded.push(flags[0]);
+    if long {
+        encoded.extend_from_slice(&(body_len as u64).to_be_bytes());
+    } else {
+        encoded.push(body_len as u8);
+    }
+    let start = encoded.len();
+    encoded.resize(start + body_len, 0);
+    stream
+        .read_exact(&mut encoded[start..])
+        .map_err(map_io_error)?;
+    Ok(encoded)
+}
+
+fn write_zmtp_handshake_ipc(
+    stream: &mut IpcStreamHandle,
+    socket_type: SocketType,
+    as_server: bool,
+) -> Result<bool> {
+    let greeting = if as_server {
+        ZmtpGreeting::null_server()
+    } else {
+        ZmtpGreeting::null_client()
+    };
+    if as_server {
+        stream.set_read_timeout(None).map_err(map_io_error)?;
+    }
+    let greeting = greeting.encode();
+    stream.write_all(&greeting[..10]).map_err(map_io_error)?;
+    let peer_prefix_done = match read_zmtp_peer_greeting_prefix_ipc(stream) {
+        Ok(done) => done,
+        Err(Error::Again) => false,
+        Err(error) => return Err(error),
+    };
+    stream.write_all(&greeting[10..]).map_err(map_io_error)?;
+    if peer_prefix_done {
+        read_zmtp_greeting_tail_ipc(stream)?;
+    }
+    stream
+        .write_all(&ZmtpFrame::command(ready_command_body(socket_type)).encode_v3())
+        .map_err(map_io_error)?;
+    if as_server {
+        stream
+            .set_read_timeout(Some(Duration::from_millis(1_000)))
+            .map_err(map_io_error)?;
+    }
+    Ok(peer_prefix_done)
+}
+
+fn read_zmtp_peer_ready_ipc(stream: &mut IpcStreamHandle) -> Result<()> {
+    loop {
+        let frame = read_zmtp_frame_ipc(stream)?;
+        if frame.command_frame() {
+            let _metadata = ZmtpMetadata::decode_ready(frame.body())?;
+            return Ok(());
+        }
+    }
+}
+
+fn read_zmtp_greeting_ipc(stream: &mut IpcStreamHandle) -> Result<()> {
+    let mut greeting = [0u8; 64];
+    stream.read_exact(&mut greeting).map_err(map_io_error)?;
+    ZmtpGreeting::decode(&greeting).map(|_| ())
+}
+
+fn read_zmtp_greeting_tail_ipc(stream: &mut IpcStreamHandle) -> Result<()> {
+    let mut remainder = [0u8; 54];
+    stream.read_exact(&mut remainder).map_err(map_io_error)
+}
+
+fn read_zmtp_peer_greeting_prefix_ipc(stream: &mut IpcStreamHandle) -> Result<bool> {
+    let mut prefix = [0u8; 10];
+    stream.read_exact(&mut prefix).map_err(map_io_error)?;
+    if prefix[0] == 0xFF && prefix[9] == 0x7F {
+        return Ok(true);
+    }
+    if prefix[0] == 3 && prefix[2..6] == *b"NULL" {
+        return Ok(true);
+    }
+    Err(Error::InvalidArgument)
+}
+
+fn read_zmtp_frame_ipc(stream: &mut IpcStreamHandle) -> Result<ZmtpFrame> {
+    let encoded = read_zmtp_frame_bytes_ipc(stream)?;
+    ZmtpFrame::decode_v3(&encoded)
+}
+
+fn read_zmtp_frame_bytes_ipc(stream: &mut IpcStreamHandle) -> Result<Vec<u8>> {
+    let mut flags = [0u8; 1];
+    stream.read_exact(&mut flags).map_err(map_io_error)?;
+    let long = flags[0] & 0x02 != 0;
+    let body_len = if long {
+        let mut len = [0u8; 8];
+        stream.read_exact(&mut len).map_err(map_io_error)?;
+        u64::from_be_bytes(len) as usize
+    } else {
+        let mut len = [0u8; 1];
+        stream.read_exact(&mut len).map_err(map_io_error)?;
+        len[0] as usize
+    };
+    let mut encoded = Vec::with_capacity(if long { 9 } else { 2 } + body_len);
+    encoded.push(flags[0]);
+    if long {
+        encoded.extend_from_slice(&(body_len as u64).to_be_bytes());
+    } else {
+        encoded.push(body_len as u8);
+    }
+    let start = encoded.len();
+    encoded.resize(start + body_len, 0);
+    stream
+        .read_exact(&mut encoded[start..])
+        .map_err(map_io_error)?;
+    Ok(encoded)
+}
+
+fn ready_command_body(socket_type: SocketType) -> Vec<u8> {
+    let socket_type = match socket_type {
+        SocketType::Pair => "PAIR",
+        SocketType::Pull => "PULL",
+        SocketType::Push => "PUSH",
+        SocketType::Req => "REQ",
+        SocketType::Rep => "REP",
+        SocketType::Dealer => "DEALER",
+        SocketType::Router => "ROUTER",
+        SocketType::Pub => "PUB",
+        SocketType::Sub => "SUB",
+        _ => "PAIR",
+    };
+    ZmtpMetadata::new([("Socket-Type", socket_type.as_bytes().to_vec())]).encode_ready()
+}
+
+fn is_reconnectable_tcp_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::TimedOut
+    )
+}
+
+fn map_io_error(error: io::Error) -> Error {
+    match error.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => Error::Again,
+        io::ErrorKind::InvalidInput => Error::InvalidArgument,
+        io::ErrorKind::Unsupported => Error::NotSupported,
+        _ => Error::InvalidSocket,
     }
 }

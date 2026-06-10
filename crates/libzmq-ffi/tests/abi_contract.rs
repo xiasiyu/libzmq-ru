@@ -1,6 +1,7 @@
 use std::ffi::CStr;
 use std::ffi::{c_char, c_int, c_void};
 use std::mem::{align_of, size_of, MaybeUninit};
+use std::net::TcpListener;
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -307,6 +308,144 @@ fn pair_inproc_round_trip_over_c_abi() {
     assert_eq!(zmq_close(client), 0);
     assert_eq!(zmq_close(server), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn pair_tcp_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    assert_eq!(zmq_send(client, b"hello".as_ptr().cast(), 5, 0), 5);
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(server, &mut buffer), 5);
+    assert_eq!(&buffer[..5], b"hello");
+
+    assert_eq!(zmq_send(server, b"world".as_ptr().cast(), 5, 0), 5);
+    assert_eq!(recv_retry(client, &mut buffer), 5);
+    assert_eq!(&buffer[..5], b"world");
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn push_pull_tcp_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let pull = zmq_socket(ctx, ZMQ_PULL);
+    let push = zmq_socket(ctx, ZMQ_PUSH);
+    assert!(!pull.is_null());
+    assert!(!push.is_null());
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(pull, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(push, endpoint.as_ptr()), 0);
+
+    assert_eq!(zmq_send(push, b"job".as_ptr().cast(), 3, 0), 3);
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(pull, &mut buffer), 3);
+    assert_eq!(&buffer[..3], b"job");
+
+    assert_eq!(zmq_close(push), 0);
+    assert_eq!(zmq_close(pull), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn req_rep_tcp_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let rep = zmq_socket(ctx, ZMQ_REP);
+    let req = zmq_socket(ctx, ZMQ_REQ);
+    assert!(!rep.is_null());
+    assert!(!req.is_null());
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(rep, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(req, endpoint.as_ptr()), 0);
+
+    assert_eq!(zmq_send(req, b"question".as_ptr().cast(), 8, 0), 8);
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(rep, &mut buffer), 8);
+    assert_eq!(&buffer[..8], b"question");
+    assert_eq!(zmq_send(rep, b"answer".as_ptr().cast(), 6, 0), 6);
+    assert_eq!(recv_retry(req, &mut buffer), 6);
+    assert_eq!(&buffer[..6], b"answer");
+
+    assert_eq!(zmq_close(req), 0);
+    assert_eq!(zmq_close(rep), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn pair_ipc_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+
+    let path = std::env::temp_dir().join(format!(
+        "libzmq-c-ipc-{}-round-trip.sock",
+        std::process::id()
+    ));
+    let endpoint = std::ffi::CString::new(format!("ipc://{}", path.display())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+
+    assert_eq!(zmq_send(client, b"hello".as_ptr().cast(), 5, 0), 5);
+    let mut buffer = [0u8; 16];
+    assert_eq!(
+        zmq_recv(server, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        5
+    );
+    assert_eq!(&buffer[..5], b"hello");
+
+    assert_eq!(zmq_send(server, b"world".as_ptr().cast(), 5, 0), 5);
+    assert_eq!(
+        zmq_recv(client, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        5
+    );
+    assert_eq!(&buffer[..5], b"world");
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+    let _ = std::fs::remove_file(path);
+}
+
+fn unused_tcp_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn recv_retry(socket: *mut c_void, buffer: &mut [u8]) -> c_int {
+    let mut rc = -1;
+    for _ in 0..20 {
+        rc = zmq_recv(socket, buffer.as_mut_ptr().cast(), buffer.len(), 0);
+        if rc >= 0 {
+            return rc;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    rc
 }
 
 #[test]
