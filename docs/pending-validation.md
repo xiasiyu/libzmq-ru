@@ -14,10 +14,11 @@ This document tracks release blockers and validation items that cannot be truthf
 - `pgm://` and `epgm://` transports: require OpenPGM availability and implementation validation.
 - `tipc://`, `vmci://`, and `vsock://` transports: require corresponding platform/kernel support and implementation validation.
 - UDP `RADIO`/`DISH` transport parity needs oracle coverage for original group and endpoint semantics beyond the current local round trips.
-- Custom socket routing identity behavior still needs full original parity: C ABI option storage/validation, inproc `ZMQ_PROBE_ROUTER`, and inproc `zmq_socket_get_peer_state` numeric peer-id behavior are covered, but routing paths still use the current internal numeric peer-id model and do not yet match original TCP/IPC blob identity framing.
-- Draft hello/disconnect/hiccup message options now have original set/clear surface behavior, but full pipe/session delivery semantics are not complete yet.
-- XPUB/XSUB draft option surface is partially covered, including `ZMQ_TOPICS_COUNT`, but full manual-last and only-first-subscribe forwarding semantics still need parity work.
-- `zmq_socket_monitor_pipes_stats` now covers original precondition errors and inproc v2 queue-stat event publication, but TCP/IPC I/O-thread queue-stat parity remains incomplete.
+- Custom socket routing identity behavior still needs full original parity: C ABI option storage/validation, inproc `ZMQ_PROBE_ROUTER`, and inproc `zmq_socket_get_peer_state` numeric plus exposed decimal-blob peer-id behavior are covered, but routing paths still use the current internal numeric peer-id model and do not yet match original TCP/IPC arbitrary blob identity framing.
+- `ZMQ_ROUTER_RAW` and `ZMQ_STREAM_NOTIFY` now have original option-level validation coverage, but full raw ROUTER/STREAM notification delivery semantics are not complete yet.
+- Draft hello/disconnect message options now deliver over the inproc pipe path, and hello/disconnect/hiccup options have original set/clear surface behavior, but full TCP/IPC session delivery and hiccup semantics are not complete yet.
+- XPUB/XSUB draft option surface is partially covered, including `ZMQ_TOPICS_COUNT` and `ZMQ_ONLY_FIRST_SUBSCRIBE` validation. Inproc default subscription notifications now suppress duplicate subscribes and forward first unsubscribes, and `ZMQ_XPUB_VERBOSE` forwards duplicate subscribes. Full manual-last, verboser unsubscribe, and only-first-subscribe multipart forwarding semantics still need parity work.
+- `zmq_socket_monitor_pipes_stats` now covers original precondition errors plus inproc and established TCP/IPC synchronous stream v2 queue-stat event publication, but full original I/O-thread queue-depth oracle parity remains incomplete.
 
 ## Test Infrastructure Gaps
 
@@ -40,12 +41,15 @@ This document tracks release blockers and validation items that cannot be truthf
 - `ZMQ_MULTICAST_LOOP` now has original default and relaxed boolean set/get behavior, and UDP multicast setup uses the configured value.
 - Draft/control integer socket options now cover original defaults and validation for reconnect-stop, priority, in/out batch sizes, loopback fastpath, and set-only busy-poll behavior.
 - `ZMQ_HELLO_MSG`, `ZMQ_DISCONNECT_MSG`, and `ZMQ_HICCUP_MSG` now support original set/clear C ABI option shape and remain non-gettable like original libzmq.
+- `ZMQ_HELLO_MSG` and `ZMQ_DISCONNECT_MSG` now deliver configured lifecycle messages over the inproc pipe path.
 - `ZMQ_TOPICS_COUNT`, `ZMQ_XPUB_MANUAL_LAST_VALUE`, `ZMQ_ONLY_FIRST_SUBSCRIBE`, and `ZMQ_XSUB_VERBOSE_UNSUBSCRIBE` now have native/C ABI option-surface coverage for local XPUB/XSUB cases.
-- `zmq_socket_get_peer_state` now reports `ZMQ_POLLOUT`, HWM-full `0`, `ENOTSUP`, and `EHOSTUNREACH` for the current inproc `ROUTER` numeric peer-id path.
+- Inproc XPUB/XSUB default subscription forwarding now matches original first-subscribe and removed-unsubscribe notification behavior for local subscription changes, and `ZMQ_XPUB_VERBOSE` now forwards duplicate subscribe notifications.
+- `zmq_socket_get_peer_state` now reports `ZMQ_POLLOUT`, HWM-full `0`, `ENOTSUP`, and `EHOSTUNREACH` for the current inproc `ROUTER` numeric peer-id path and accepts the received message's decimal `Routing-Id` blob property.
+- `ZMQ_ROUTER_RAW` and `ZMQ_STREAM_NOTIFY` now cover original C ABI set-option validation for ROUTER and STREAM sockets.
 - `zmq_socket_monitor` and `zmq_socket_monitor_versioned` now return original `EPROTONOSUPPORT` for non-`inproc://` monitor endpoints.
 - `zmq_socket_monitor` and `zmq_socket_monitor_versioned` now support original null-endpoint monitor deregistration behavior.
 - `zmq_socket_monitor_versioned` now binds monitor endpoints with the requested `PAIR`, `PUB`, or `PUSH` socket type instead of only validating the type argument.
-- `zmq_socket_monitor_pipes_stats` now returns original `ENOTSOCK`, `EINVAL`, and `EAGAIN` precondition errors and publishes inproc v2 queue-stat events instead of blanket `ENOTSUP`.
+- `zmq_socket_monitor_pipes_stats` now returns original `ENOTSOCK`, `EINVAL`, and `EAGAIN` precondition errors and publishes v2 queue-stat events for inproc pipes plus established TCP/IPC synchronous streams instead of blanket `ENOTSUP`.
 - `zmq_msg_gets` now returns `EINVAL` for missing metadata properties, matching original libzmq.
 - `zmq_strerror(EHOSTUNREACH)` now returns original `Host unreachable` text for the libzmq custom errno.
 - `zmq_ctx_set_ext` and `zmq_ctx_get_ext` now support original `ZMQ_THREAD_NAME_PREFIX` string round-trips and validation.

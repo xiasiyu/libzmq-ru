@@ -36,6 +36,7 @@ const ZMQ_PULL: c_int = 7;
 const ZMQ_PUSH: c_int = 8;
 const ZMQ_XPUB: c_int = 9;
 const ZMQ_XSUB: c_int = 10;
+const ZMQ_STREAM: c_int = 11;
 const ZMQ_SERVER: c_int = 12;
 const ZMQ_CLIENT: c_int = 13;
 const ZMQ_RADIO: c_int = 14;
@@ -82,6 +83,8 @@ const ZMQ_TCP_KEEPALIVE_CNT: c_int = 35;
 const ZMQ_TCP_KEEPALIVE_IDLE: c_int = 36;
 const ZMQ_TCP_KEEPALIVE_INTVL: c_int = 37;
 const ZMQ_IMMEDIATE: c_int = 39;
+const ZMQ_XPUB_VERBOSE: c_int = 40;
+const ZMQ_ROUTER_RAW: c_int = 41;
 const ZMQ_IPV6: c_int = 42;
 const ZMQ_MECHANISM: c_int = 43;
 const ZMQ_PLAIN_SERVER: c_int = 44;
@@ -106,6 +109,7 @@ const ZMQ_HANDSHAKE_IVL: c_int = 66;
 const ZMQ_SOCKS_PROXY: c_int = 68;
 const ZMQ_LOOPBACK_FASTPATH: c_int = 94;
 const ZMQ_XPUB_WELCOME_MSG: c_int = 72;
+const ZMQ_STREAM_NOTIFY: c_int = 73;
 const ZMQ_INVERT_MATCHING: c_int = 74;
 const ZMQ_BLOCKY: c_int = 70;
 const ZMQ_HEARTBEAT_IVL: c_int = 75;
@@ -118,6 +122,7 @@ const ZMQ_USE_FD: c_int = 89;
 const ZMQ_BINDTODEVICE: c_int = 92;
 const ZMQ_MULTICAST_LOOP: c_int = 96;
 const ZMQ_XPUB_MANUAL_LAST_VALUE: c_int = 98;
+const ZMQ_ONLY_FIRST_SUBSCRIBE: c_int = 108;
 const ZMQ_IN_BATCH_SIZE: c_int = 101;
 const ZMQ_OUT_BATCH_SIZE: c_int = 102;
 const ZMQ_RECONNECT_STOP: c_int = 109;
@@ -2140,6 +2145,22 @@ fn router_peer_state_reports_connected_peer_over_c_abi() {
     assert_eq!(zmq_msg_recv(&mut inbound, router, 0), 5);
     let routing_id = zmq_msg_routing_id(&mut inbound);
     assert_ne!(routing_id, 0);
+    let routing_id_property = c"Routing-Id";
+    let routing_id_blob = zmq_msg_gets(&inbound, routing_id_property.as_ptr());
+    assert!(!routing_id_blob.is_null());
+    let routing_id_blob = unsafe { CStr::from_ptr(routing_id_blob) };
+    assert_eq!(
+        routing_id_blob.to_str().unwrap().parse::<u32>().unwrap(),
+        routing_id
+    );
+    assert_eq!(
+        zmq_socket_get_peer_state(
+            router,
+            routing_id_blob.as_ptr().cast(),
+            routing_id_blob.to_bytes().len()
+        ),
+        ZMQ_POLLOUT as c_int
+    );
     assert_eq!(
         zmq_socket_get_peer_state(router, (&routing_id as *const u32).cast(), size_of::<u32>()),
         ZMQ_POLLOUT as c_int
@@ -2455,6 +2476,134 @@ fn xpub_welcome_and_xsub_replay_over_c_abi() {
         welcome.len() as c_int
     );
     assert_eq!(&buffer[..welcome.len()], welcome);
+    assert_eq!(
+        zmq_setsockopt(
+            subscriber,
+            ZMQ_SUBSCRIBE,
+            prefix.as_ptr().cast(),
+            prefix.len()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        -1
+    );
+    assert_eq!(zmq_errno(), EAGAIN);
+    assert_eq!(
+        zmq_setsockopt(
+            subscriber,
+            ZMQ_UNSUBSCRIBE,
+            prefix.as_ptr().cast(),
+            prefix.len()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        1 + prefix.len() as c_int
+    );
+    assert_eq!(&buffer[..1 + prefix.len()], b"\0topic");
+    assert_eq!(
+        zmq_setsockopt(
+            subscriber,
+            ZMQ_UNSUBSCRIBE,
+            prefix.as_ptr().cast(),
+            prefix.len()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        -1
+    );
+    assert_eq!(zmq_errno(), EAGAIN);
+
+    assert_eq!(zmq_close(subscriber), 0);
+    assert_eq!(zmq_close(publisher), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn xpub_verbose_forwards_duplicate_subscriptions_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let publisher = zmq_socket(ctx, ZMQ_XPUB);
+    let subscriber = zmq_socket(ctx, ZMQ_XSUB);
+    assert!(!publisher.is_null());
+    assert!(!subscriber.is_null());
+
+    let mut value = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            publisher,
+            ZMQ_XPUB_VERBOSE,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+
+    let endpoint = c"inproc://c_xpub_verbose_duplicates";
+    assert_eq!(zmq_bind(publisher, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(subscriber, endpoint.as_ptr()), 0);
+
+    let prefix = b"dup";
+    assert_eq!(
+        zmq_setsockopt(
+            subscriber,
+            ZMQ_SUBSCRIBE,
+            prefix.as_ptr().cast(),
+            prefix.len()
+        ),
+        0
+    );
+    let mut buffer = [0u8; 16];
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        1 + prefix.len() as c_int
+    );
+    assert_eq!(&buffer[..1 + prefix.len()], b"\x01dup");
+
+    assert_eq!(
+        zmq_setsockopt(
+            subscriber,
+            ZMQ_SUBSCRIBE,
+            prefix.as_ptr().cast(),
+            prefix.len()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        1 + prefix.len() as c_int
+    );
+    assert_eq!(&buffer[..1 + prefix.len()], b"\x01dup");
+
+    value = 0;
+    assert_eq!(
+        zmq_setsockopt(
+            publisher,
+            ZMQ_XPUB_VERBOSE,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(
+            subscriber,
+            ZMQ_SUBSCRIBE,
+            prefix.as_ptr().cast(),
+            prefix.len()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        -1
+    );
+    assert_eq!(zmq_errno(), EAGAIN);
 
     assert_eq!(zmq_close(subscriber), 0);
     assert_eq!(zmq_close(publisher), 0);
@@ -2935,6 +3084,126 @@ fn monitor_pipes_stats_reports_precondition_errors_over_c_abi() {
     assert_eq!(zmq_close(pull), 0);
     assert_eq!(zmq_close(push), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn monitor_pipes_stats_reports_tcp_stream_event_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    let monitor = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+    assert!(!monitor.is_null());
+
+    let monitor_endpoint = c"inproc://c_monitor_tcp_pipes_stats";
+    assert_eq!(
+        zmq_socket_monitor_versioned(
+            client,
+            monitor_endpoint.as_ptr(),
+            ZMQ_EVENT_PIPES_STATS as u64,
+            2,
+            ZMQ_PAIR
+        ),
+        0
+    );
+    assert_eq!(zmq_connect(monitor, monitor_endpoint.as_ptr()), 0);
+
+    let endpoint = CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_send(client, b"ping".as_ptr().cast(), 4, 0), 4);
+    let mut payload = [0u8; 8];
+    assert_eq!(recv_retry(server, &mut payload), 4);
+    assert_eq!(&payload[..4], b"ping");
+
+    assert_eq!(zmq_socket_monitor_pipes_stats(client), 0);
+    assert_eq!(recv_u64_frame(monitor), ZMQ_EVENT_PIPES_STATS as u64);
+    assert_eq!(recv_u64_frame(monitor), 2);
+    assert_eq!(recv_u64_frame(monitor), 0);
+    assert_eq!(recv_u64_frame(monitor), 0);
+
+    let mut local = [0u8; 64];
+    assert_eq!(
+        zmq_recv(monitor, local.as_mut_ptr().cast(), local.len(), 0),
+        endpoint.as_bytes().len() as c_int
+    );
+    assert_eq!(&local[..endpoint.as_bytes().len()], endpoint.as_bytes());
+    let mut remote = [0u8; 64];
+    assert_eq!(
+        zmq_recv(monitor, remote.as_mut_ptr().cast(), remote.len(), 0),
+        endpoint.as_bytes().len() as c_int
+    );
+    assert_eq!(&remote[..endpoint.as_bytes().len()], endpoint.as_bytes());
+
+    assert_eq!(zmq_close(monitor), 0);
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn monitor_pipes_stats_reports_ipc_stream_event_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    let monitor = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+    assert!(!monitor.is_null());
+
+    let monitor_endpoint = c"inproc://c_monitor_ipc_pipes_stats";
+    assert_eq!(
+        zmq_socket_monitor_versioned(
+            client,
+            monitor_endpoint.as_ptr(),
+            ZMQ_EVENT_PIPES_STATS as u64,
+            2,
+            ZMQ_PAIR
+        ),
+        0
+    );
+    assert_eq!(zmq_connect(monitor, monitor_endpoint.as_ptr()), 0);
+
+    let path = std::env::temp_dir().join(format!(
+        "libzmq-c-monitor-ipc-{}-pipes.sock",
+        std::process::id()
+    ));
+    let endpoint = CString::new(format!("ipc://{}", path.display())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_send(client, b"ping".as_ptr().cast(), 4, 0), 4);
+    let mut payload = [0u8; 8];
+    assert_eq!(recv_retry(server, &mut payload), 4);
+    assert_eq!(&payload[..4], b"ping");
+
+    assert_eq!(zmq_socket_monitor_pipes_stats(client), 0);
+    assert_eq!(recv_u64_frame(monitor), ZMQ_EVENT_PIPES_STATS as u64);
+    assert_eq!(recv_u64_frame(monitor), 2);
+    assert_eq!(recv_u64_frame(monitor), 0);
+    assert_eq!(recv_u64_frame(monitor), 0);
+
+    let mut local = [0u8; 128];
+    assert_eq!(
+        zmq_recv(monitor, local.as_mut_ptr().cast(), local.len(), 0),
+        endpoint.as_bytes().len() as c_int
+    );
+    assert_eq!(&local[..endpoint.as_bytes().len()], endpoint.as_bytes());
+    let mut remote = [0u8; 128];
+    assert_eq!(
+        zmq_recv(monitor, remote.as_mut_ptr().cast(), remote.len(), 0),
+        endpoint.as_bytes().len() as c_int
+    );
+    assert_eq!(&remote[..endpoint.as_bytes().len()], endpoint.as_bytes());
+
+    assert_eq!(zmq_close(monitor), 0);
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+    let _ = std::fs::remove_file(path);
 }
 
 fn recv_u64_frame(socket: *mut c_void) -> u64 {
@@ -3764,6 +4033,156 @@ fn draft_message_socket_options_set_over_c_abi() {
 }
 
 #[test]
+fn inproc_hello_and_disconnect_messages_deliver_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let router = zmq_socket(ctx, ZMQ_ROUTER);
+    let dealer = zmq_socket(ctx, ZMQ_DEALER);
+    assert!(!router.is_null());
+    assert!(!dealer.is_null());
+
+    assert_eq!(
+        zmq_setsockopt(dealer, ZMQ_HELLO_MSG, b"hello".as_ptr().cast(), 5),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(dealer, ZMQ_DISCONNECT_MSG, b"goodbye".as_ptr().cast(), 7),
+        0
+    );
+
+    let endpoint = c"inproc://c_inproc_lifecycle_messages";
+    assert_eq!(zmq_bind(router, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(dealer, endpoint.as_ptr()), 0);
+
+    let mut hello = MaybeUninit::<zmq_msg_t>::uninit();
+    assert_eq!(zmq_msg_init(hello.as_mut_ptr()), 0);
+    let mut hello = unsafe { hello.assume_init() };
+    assert_eq!(zmq_msg_recv(&mut hello, router, 0), 5);
+    assert_ne!(zmq_msg_routing_id(&mut hello), 0);
+    let hello_data =
+        unsafe { std::slice::from_raw_parts(zmq_msg_data(&mut hello).cast::<u8>(), 5) };
+    assert_eq!(hello_data, b"hello");
+
+    assert_eq!(zmq_disconnect(dealer, endpoint.as_ptr()), 0);
+    let mut goodbye = MaybeUninit::<zmq_msg_t>::uninit();
+    assert_eq!(zmq_msg_init(goodbye.as_mut_ptr()), 0);
+    let mut goodbye = unsafe { goodbye.assume_init() };
+    assert_eq!(zmq_msg_recv(&mut goodbye, router, 0), 7);
+    assert_ne!(zmq_msg_routing_id(&mut goodbye), 0);
+    let goodbye_data =
+        unsafe { std::slice::from_raw_parts(zmq_msg_data(&mut goodbye).cast::<u8>(), 7) };
+    assert_eq!(goodbye_data, b"goodbye");
+
+    assert_eq!(zmq_msg_close(&mut goodbye), 0);
+    assert_eq!(zmq_msg_close(&mut hello), 0);
+    assert_eq!(zmq_close(dealer), 0);
+    assert_eq!(zmq_close(router), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn router_raw_and_stream_notify_options_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let router = zmq_socket(ctx, ZMQ_ROUTER);
+    let stream = zmq_socket(ctx, ZMQ_STREAM);
+    let pair = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!router.is_null());
+    assert!(!stream.is_null());
+    assert!(!pair.is_null());
+
+    let mut value = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            router,
+            ZMQ_ROUTER_RAW,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    value = 0;
+    assert_eq!(
+        zmq_setsockopt(
+            router,
+            ZMQ_ROUTER_RAW,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    value = -1;
+    assert_eq!(
+        zmq_setsockopt(
+            router,
+            ZMQ_ROUTER_RAW,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+    value = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            pair,
+            ZMQ_ROUTER_RAW,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+
+    assert_eq!(
+        zmq_setsockopt(
+            stream,
+            ZMQ_STREAM_NOTIFY,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    value = 0;
+    assert_eq!(
+        zmq_setsockopt(
+            stream,
+            ZMQ_STREAM_NOTIFY,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    value = 2;
+    assert_eq!(
+        zmq_setsockopt(
+            stream,
+            ZMQ_STREAM_NOTIFY,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+    value = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            pair,
+            ZMQ_STREAM_NOTIFY,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+
+    assert_eq!(zmq_close(pair), 0);
+    assert_eq!(zmq_close(stream), 0);
+    assert_eq!(zmq_close(router), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
 fn xpub_xsub_draft_options_over_c_abi() {
     let ctx = zmq_ctx_new();
     assert!(!ctx.is_null());
@@ -3793,7 +4212,36 @@ fn xpub_xsub_draft_options_over_c_abi() {
         ),
         0
     );
+    value = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            xpub,
+            ZMQ_ONLY_FIRST_SUBSCRIBE,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(
+            xsub,
+            ZMQ_ONLY_FIRST_SUBSCRIBE,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
     value = -1;
+    assert_eq!(
+        zmq_setsockopt(
+            xpub,
+            ZMQ_ONLY_FIRST_SUBSCRIBE,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
     assert_eq!(
         zmq_setsockopt(
             xsub,

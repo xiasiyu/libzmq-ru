@@ -107,6 +107,7 @@ pub const ZMQ_TCP_KEEPALIVE_IDLE: i32 = 36;
 pub const ZMQ_TCP_KEEPALIVE_INTVL: i32 = 37;
 pub const ZMQ_IMMEDIATE: i32 = 39;
 pub const ZMQ_XPUB_VERBOSE: i32 = 40;
+pub const ZMQ_ROUTER_RAW: i32 = 41;
 pub const ZMQ_IPV6: i32 = 42;
 pub const ZMQ_MECHANISM: i32 = 43;
 pub const ZMQ_PLAIN_SERVER: i32 = 44;

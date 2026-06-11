@@ -24,6 +24,14 @@ pub(crate) struct ContextShared {
 pub(crate) type MessageQueue = Arc<Mutex<VecDeque<Message>>>;
 pub(crate) type SubscriptionSet = Arc<Mutex<SubscriptionState>>;
 pub(crate) type WelcomeMessage = Arc<Mutex<Option<Vec<u8>>>>;
+pub(crate) type XpubSubscriptionPolicy = Arc<Mutex<XpubSubscriptionPolicyState>>;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct XpubSubscriptionPolicyState {
+    pub(crate) verbose_subscribe: bool,
+    pub(crate) verbose_unsubscribe: bool,
+    pub(crate) manual: bool,
+}
 
 #[derive(Debug)]
 pub(crate) struct SubscriptionState {
@@ -62,21 +70,23 @@ impl SubscriptionState {
         true
     }
 
-    pub(crate) fn remove(&mut self, prefix: &[u8]) {
-        if self.exact.remove(prefix) {
-            self.prefixes.retain(|stored| stored.as_slice() != prefix);
-            self.has_empty = self.exact.contains(&[][..]);
-            self.first_bytes = [false; 256];
-            self.lengths.clear();
-            for stored in &self.prefixes {
-                if let Some(first) = stored.first() {
-                    self.first_bytes[*first as usize] = true;
-                }
-                if !self.lengths.contains(&stored.len()) {
-                    self.lengths.push(stored.len());
-                }
+    pub(crate) fn remove(&mut self, prefix: &[u8]) -> bool {
+        if !self.exact.remove(prefix) {
+            return false;
+        }
+        self.prefixes.retain(|stored| stored.as_slice() != prefix);
+        self.has_empty = self.exact.contains(&[][..]);
+        self.first_bytes = [false; 256];
+        self.lengths.clear();
+        for stored in &self.prefixes {
+            if let Some(first) = stored.first() {
+                self.first_bytes[*first as usize] = true;
+            }
+            if !self.lengths.contains(&stored.len()) {
+                self.lengths.push(stored.len());
             }
         }
+        true
     }
 
     fn iter_prefixes(&self) -> impl Iterator<Item = &[u8]> {
@@ -113,6 +123,7 @@ pub(crate) struct InprocEndpoint {
     binder_type: SocketType,
     binder_subscriptions: SubscriptionSet,
     binder_welcome: WelcomeMessage,
+    binder_xpub_policy: XpubSubscriptionPolicy,
     peers: Mutex<Vec<InprocPeer>>,
     next_peer: AtomicUsize,
 }
@@ -131,12 +142,14 @@ impl InprocEndpoint {
         binder_type: SocketType,
         binder_subscriptions: SubscriptionSet,
         binder_welcome: WelcomeMessage,
+        binder_xpub_policy: XpubSubscriptionPolicy,
     ) -> Self {
         Self {
             binder_inbox,
             binder_type,
             binder_subscriptions,
             binder_welcome,
+            binder_xpub_policy,
             peers: Mutex::new(Vec::new()),
             next_peer: AtomicUsize::new(0),
         }
@@ -263,11 +276,47 @@ impl InprocEndpoint {
     }
 
     pub(crate) fn replay_subscription(&self, prefix: &[u8]) -> Result<()> {
+        self.replay_subscription_change(true, prefix)
+    }
+
+    pub(crate) fn replay_duplicate_subscription(&self, prefix: &[u8]) -> Result<()> {
+        if self.binder_type != SocketType::Xpub {
+            return Ok(());
+        }
+        let policy = *self
+            .binder_xpub_policy
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?;
+        if policy.verbose_subscribe || policy.manual {
+            self.replay_subscription_change(true, prefix)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn replay_unsubscription(&self, prefix: &[u8]) -> Result<()> {
+        self.replay_subscription_change(false, prefix)
+    }
+
+    pub(crate) fn replay_duplicate_unsubscription(&self, prefix: &[u8]) -> Result<()> {
+        if self.binder_type != SocketType::Xpub {
+            return Ok(());
+        }
+        let policy = *self
+            .binder_xpub_policy
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?;
+        if policy.verbose_unsubscribe || policy.manual {
+            self.replay_subscription_change(false, prefix)?;
+        }
+        Ok(())
+    }
+
+    fn replay_subscription_change(&self, subscribe: bool, prefix: &[u8]) -> Result<()> {
         if self.binder_type != SocketType::Xpub {
             return Ok(());
         }
         let mut frame = Vec::with_capacity(prefix.len() + 1);
-        frame.push(1);
+        frame.push(u8::from(subscribe));
         frame.extend_from_slice(prefix);
         self.binder_inbox
             .lock()
@@ -585,11 +634,11 @@ impl ContextShared {
     pub(crate) fn bind_inproc(
         &self,
         endpoint: &str,
-        _id: usize,
         inbox: MessageQueue,
         socket_type: SocketType,
         subscriptions: SubscriptionSet,
         welcome: WelcomeMessage,
+        xpub_policy: XpubSubscriptionPolicy,
     ) -> Result<Arc<InprocEndpoint>> {
         let mut endpoints = self
             .inproc_endpoints
@@ -603,6 +652,7 @@ impl ContextShared {
             socket_type,
             subscriptions,
             welcome,
+            xpub_policy,
         ));
         let pending_peers = self
             .pending_inproc

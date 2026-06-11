@@ -289,12 +289,20 @@ impl FfiMessageInner {
         let more = message.more();
         let routing_id = message.routing_id();
         let group = message.group().and_then(|group| CString::new(group).ok());
+        let metadata = if routing_id == 0 {
+            Vec::new()
+        } else {
+            vec![(
+                CString::new("Routing-Id").expect("static metadata key has no NUL"),
+                CString::new(routing_id.to_string()).expect("numeric routing id has no NUL"),
+            )]
+        };
         Self {
             storage: MessageStorage::Owned(message),
             more,
             routing_id,
             group,
-            metadata: Vec::new(),
+            metadata,
         }
     }
 
@@ -2481,11 +2489,10 @@ pub extern "C" fn zmq_socket_get_peer_state(
     if routing_id.is_null() && routing_id_size != 0 {
         return set_error(Error::InvalidArgument);
     }
-    if routing_id_size != std::mem::size_of::<u32>() {
-        return set_error(Error::HostUnreachable);
-    }
-    // SAFETY: `routing_id` is non-null because `routing_id_size` is exactly `u32` size.
-    let routing_id = unsafe { *(routing_id.cast::<u32>()) };
+    let routing_id = match parse_peer_state_routing_id(routing_id, routing_id_size) {
+        Some(routing_id) => routing_id,
+        None => return set_error(Error::HostUnreachable),
+    };
     match socket.inner.peer_state(routing_id) {
         Ok(state) => {
             clear_errno();
@@ -2493,6 +2500,30 @@ pub extern "C" fn zmq_socket_get_peer_state(
         }
         Err(error) => set_error(error),
     }
+}
+
+fn parse_peer_state_routing_id(routing_id: *const c_void, routing_id_size: usize) -> Option<u32> {
+    if routing_id.is_null() || routing_id_size == 0 {
+        return None;
+    }
+    // The rewrite's current inproc ROUTER identity is exposed to C as the decimal
+    // Routing-Id property, so accept that blob form in addition to the legacy u32.
+    // SAFETY: libzmq C ABI provides a valid `routing_id_size` byte blob.
+    let bytes = unsafe { std::slice::from_raw_parts(routing_id.cast::<u8>(), routing_id_size) };
+    if !bytes.is_empty() && bytes.iter().all(|byte| byte.is_ascii_digit()) {
+        return std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value != 0);
+    }
+    if routing_id_size == std::mem::size_of::<u32>() {
+        // SAFETY: Caller supplied exactly `u32` bytes and the pointer was checked non-null.
+        let value = unsafe { *(routing_id.cast::<u32>()) };
+        if value != 0 {
+            return Some(value);
+        }
+    }
+    None
 }
 
 #[no_mangle]

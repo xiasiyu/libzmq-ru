@@ -9,16 +9,21 @@ The C ABI target is original `libzmq` 4.3.6. Public headers live in `include/` a
 - Exported C ABI functions use the same symbol names as original libzmq.
 - C ABI functions route through the shared Rust core rather than a separate implementation.
 - Unsupported transports return explicit errors instead of fake success.
-- `zmq_socket_get_peer_state` supports the current inproc `ROUTER` numeric peer-id path, including `ZMQ_POLLOUT`, `ENOTSUP`, and `EHOSTUNREACH` behavior.
-- `zmq_socket_monitor_pipes_stats` matches original precondition errors and publishes v2 queue-stat monitor events for inproc pipes.
+- `zmq_socket_get_peer_state` supports the current inproc `ROUTER` numeric peer-id path and the received message's decimal `Routing-Id` blob property, including `ZMQ_POLLOUT`, `ENOTSUP`, and `EHOSTUNREACH` behavior.
+- `ZMQ_ROUTER_RAW` and `ZMQ_STREAM_NOTIFY` match original C ABI set-option validation; full raw ROUTER/STREAM notification delivery remains outside the current guarantee.
+- `zmq_socket_monitor_pipes_stats` matches original precondition errors and publishes v2 queue-stat monitor events for inproc pipes and established TCP/IPC synchronous streams.
+- `ZMQ_HELLO_MSG` and `ZMQ_DISCONNECT_MSG` deliver configured lifecycle messages over inproc pipes.
+- Inproc XPUB/XSUB default subscription notifications suppress duplicate subscribes and forward removed unsubscribes like original libzmq, and `ZMQ_XPUB_VERBOSE` forwards duplicate subscribe notifications.
 
 ## Known Release Gaps
 
 - C++ oracle interop is covered for NULL/PLAIN/CURVE TCP cases, but real GSSAPI interop remains blocked by Kerberos environment setup.
 - Same-process `tcp_interop_oracle` and process-isolated `tcp_interop_process` pass covered NULL/PLAIN/CURVE TCP directions against CURVE-capable original C++ oracle builds.
 - `norm://` has a feature-gated PUB/SUB single-frame data-object path, but is not a full socket transport yet; `pgm://`, `epgm://`, `tipc://`, `vmci://`, and `vsock://` remain unsupported socket transports.
-- Original arbitrary blob routing-id parity is incomplete: `zmq_socket_get_peer_state` currently accepts the rewrite's internal `u32` peer id, while full TCP/IPC `ROUTER` identity framing still needs original blob semantics.
-- `zmq_socket_monitor_pipes_stats` does not yet publish original I/O-thread queue stats for TCP/IPC pipes.
+- Original arbitrary blob routing-id parity is incomplete: `zmq_socket_get_peer_state` currently accepts the rewrite's internal `u32` peer id and the decimal `Routing-Id` blob exposed on received messages, while full TCP/IPC `ROUTER` identity framing still needs original arbitrary blob semantics.
+- `zmq_socket_monitor_pipes_stats` does not yet provide original I/O-thread queue-depth oracle parity for TCP/IPC beyond established synchronous stream event publication.
+- `ZMQ_HICCUP_MSG` delivery and TCP/IPC session delivery for hello/disconnect/hiccup lifecycle messages remain incomplete.
+- XPUB manual-last, verboser unsubscribe, and only-first-subscribe multipart forwarding semantics remain incomplete beyond option validation and covered inproc notification behavior.
 - Windows DLL export validation has not been run in this macOS environment.
 
 ## Validation Commands
