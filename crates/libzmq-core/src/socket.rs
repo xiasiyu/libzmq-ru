@@ -2254,7 +2254,16 @@ impl Socket {
         loop {
             if tcp.curve_session.is_some() {
                 let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
-                let body = read_zmtp_frame_body_tcp(stream)?;
+                let body = match read_zmtp_frame_body_tcp(stream) {
+                    Ok(body) => body,
+                    Err(error) => {
+                        return tcp_disconnect_message_or_error(
+                            &mut tcp,
+                            &options.disconnect_msg,
+                            error,
+                        )
+                    }
+                };
                 let session = tcp.curve_session.as_mut().ok_or(Error::InvalidSocket)?;
                 let mut message = curve_message_from_body(session, &body)?;
                 apply_peer_identity_metadata(&mut message, tcp.peer_identity.as_deref());
@@ -2262,14 +2271,32 @@ impl Socket {
             }
             if tcp.gssapi_session.is_some() {
                 let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
-                let body = read_zmtp_frame_body_tcp(stream)?;
+                let body = match read_zmtp_frame_body_tcp(stream) {
+                    Ok(body) => body,
+                    Err(error) => {
+                        return tcp_disconnect_message_or_error(
+                            &mut tcp,
+                            &options.disconnect_msg,
+                            error,
+                        )
+                    }
+                };
                 let session = tcp.gssapi_session.as_mut().ok_or(Error::InvalidSocket)?;
                 let mut message = gssapi_message_from_body(session, &body)?;
                 apply_peer_identity_metadata(&mut message, tcp.peer_identity.as_deref());
                 return Ok(message);
             }
             let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
-            let frame = read_zmtp_frame_tcp(stream)?;
+            let frame = match read_zmtp_frame_tcp(stream) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    return tcp_disconnect_message_or_error(
+                        &mut tcp,
+                        &options.disconnect_msg,
+                        error,
+                    )
+                }
+            };
             if !frame.command_frame() {
                 let mut message = Message::from_vec(frame.body().to_vec());
                 message.set_more(frame.more());
@@ -2524,7 +2551,16 @@ impl Socket {
         loop {
             if ipc.curve_session.is_some() {
                 let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
-                let body = read_zmtp_frame_body_ipc(stream)?;
+                let body = match read_zmtp_frame_body_ipc(stream) {
+                    Ok(body) => body,
+                    Err(error) => {
+                        return ipc_disconnect_message_or_error(
+                            &mut ipc,
+                            &options.disconnect_msg,
+                            error,
+                        )
+                    }
+                };
                 let session = ipc.curve_session.as_mut().ok_or(Error::InvalidSocket)?;
                 let mut message = curve_message_from_body(session, &body)?;
                 apply_peer_identity_metadata(&mut message, ipc.peer_identity.as_deref());
@@ -2532,14 +2568,32 @@ impl Socket {
             }
             if ipc.gssapi_session.is_some() {
                 let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
-                let body = read_zmtp_frame_body_ipc(stream)?;
+                let body = match read_zmtp_frame_body_ipc(stream) {
+                    Ok(body) => body,
+                    Err(error) => {
+                        return ipc_disconnect_message_or_error(
+                            &mut ipc,
+                            &options.disconnect_msg,
+                            error,
+                        )
+                    }
+                };
                 let session = ipc.gssapi_session.as_mut().ok_or(Error::InvalidSocket)?;
                 let mut message = gssapi_message_from_body(session, &body)?;
                 apply_peer_identity_metadata(&mut message, ipc.peer_identity.as_deref());
                 return Ok(message);
             }
             let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
-            let frame = read_zmtp_frame_ipc(stream)?;
+            let frame = match read_zmtp_frame_ipc(stream) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    return ipc_disconnect_message_or_error(
+                        &mut ipc,
+                        &options.disconnect_msg,
+                        error,
+                    )
+                }
+            };
             if !frame.command_frame() {
                 let mut message = Message::from_vec(frame.body().to_vec());
                 message.set_more(frame.more());
@@ -3880,6 +3934,30 @@ fn send_tcp_probe_router(
     Ok(())
 }
 
+fn tcp_disconnect_message_or_error(
+    tcp: &mut TcpState,
+    disconnect_msg: &[u8],
+    error: Error,
+) -> Result<Message> {
+    if disconnect_msg.is_empty() {
+        return Err(error);
+    }
+    reset_tcp_stream_state(tcp);
+    Ok(Message::from_vec(disconnect_msg.to_vec()))
+}
+
+fn reset_tcp_stream_state(tcp: &mut TcpState) {
+    tcp.stream = None;
+    tcp.handshake_started = false;
+    tcp.peer_greeting_done = false;
+    tcp.peer_ready = false;
+    tcp.peer_identity = None;
+    tcp.hello_sent = false;
+    tcp.probe_router_sent = false;
+    tcp.curve_session = None;
+    tcp.gssapi_session = None;
+}
+
 fn write_tcp_message_frame(tcp: &mut TcpState, data: &[u8]) -> Result<()> {
     if tcp.curve_session.is_some() {
         let frame = {
@@ -4085,6 +4163,30 @@ fn send_ipc_probe_router(
     write_ipc_message_frame(ipc, &[])?;
     ipc.probe_router_sent = true;
     Ok(())
+}
+
+fn ipc_disconnect_message_or_error(
+    ipc: &mut IpcState,
+    disconnect_msg: &[u8],
+    error: Error,
+) -> Result<Message> {
+    if disconnect_msg.is_empty() {
+        return Err(error);
+    }
+    reset_ipc_stream_state(ipc);
+    Ok(Message::from_vec(disconnect_msg.to_vec()))
+}
+
+fn reset_ipc_stream_state(ipc: &mut IpcState) {
+    ipc.stream = None;
+    ipc.handshake_started = false;
+    ipc.peer_greeting_done = false;
+    ipc.peer_ready = false;
+    ipc.peer_identity = None;
+    ipc.hello_sent = false;
+    ipc.probe_router_sent = false;
+    ipc.curve_session = None;
+    ipc.gssapi_session = None;
 }
 
 fn write_ipc_message_frame(ipc: &mut IpcState, data: &[u8]) -> Result<()> {

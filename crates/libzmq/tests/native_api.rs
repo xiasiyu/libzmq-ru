@@ -167,6 +167,28 @@ fn native_tcp_probe_router_sends_empty_message_before_payload() {
 }
 
 #[test]
+fn native_tcp_disconnect_msg_delivers_after_peer_disconnect() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Server).unwrap();
+    let client = ctx.socket(SocketType::Client).unwrap();
+
+    server
+        .set_option_bytes(ZMQ_DISCONNECT_MSG, b"goodbye")
+        .unwrap();
+    client.set_option_bytes(ZMQ_HELLO_MSG, b"hello").unwrap();
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    assert_eq!(client.send("payload").unwrap(), 7);
+    assert_eq!(recv_retry_native(&server).unwrap().data(), b"hello");
+    assert_eq!(recv_retry_native(&server).unwrap().data(), b"payload");
+    client.disconnect(&endpoint).unwrap();
+    assert_eq!(recv_retry_native(&server).unwrap().data(), b"goodbye");
+}
+
+#[test]
 fn native_pair_ws_round_trip() {
     let port = unused_tcp_port();
     let endpoint = format!("ws://127.0.0.1:{port}/zmq");
@@ -919,6 +941,34 @@ fn native_ipc_probe_router_sends_empty_message_before_payload() {
     assert!(received.data().is_empty());
     let received = router.recv().unwrap();
     assert_eq!(received.data(), b"payload");
+    let _ = std::fs::remove_file(path);
+}
+
+#[cfg(unix)]
+#[test]
+fn native_ipc_disconnect_msg_delivers_after_peer_disconnect() {
+    let path = std::env::temp_dir().join(format!(
+        "libzmq-native-ipc-{}-disconnect-msg.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let endpoint = format!("ipc://{}", path.display());
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Server).unwrap();
+    let client = ctx.socket(SocketType::Client).unwrap();
+
+    server
+        .set_option_bytes(ZMQ_DISCONNECT_MSG, b"goodbye")
+        .unwrap();
+    client.set_option_bytes(ZMQ_HELLO_MSG, b"hello").unwrap();
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    assert_eq!(client.send("payload").unwrap(), 7);
+    assert_eq!(server.recv().unwrap().data(), b"hello");
+    assert_eq!(server.recv().unwrap().data(), b"payload");
+    client.disconnect(&endpoint).unwrap();
+    assert_eq!(server.recv().unwrap().data(), b"goodbye");
     let _ = std::fs::remove_file(path);
 }
 
