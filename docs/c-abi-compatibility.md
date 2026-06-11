@@ -10,6 +10,7 @@ The C ABI target is original `libzmq` 4.3.6. Public headers live in `include/` a
 - C ABI functions route through the shared Rust core rather than a separate implementation.
 - Unsupported transports return explicit errors instead of fake success.
 - `zmq_socket_get_peer_state` supports the current inproc `ROUTER` numeric peer-id path and the received message's decimal `Routing-Id` blob property, including `ZMQ_POLLOUT`, `ENOTSUP`, and `EHOSTUNREACH` behavior.
+- `ZMQ_PROBE_ROUTER` emits the empty probe frame over inproc and active TCP/IPC ZMTP handshake paths.
 - `ZMQ_ROUTER_RAW` and `ZMQ_STREAM_NOTIFY` match original C ABI set-option validation; full raw ROUTER/STREAM notification delivery remains outside the current guarantee.
 - `zmq_socket_monitor_pipes_stats` matches original precondition errors and publishes v2 queue-stat monitor events for inproc pipes and established TCP/IPC synchronous streams.
 - `ZMQ_HELLO_MSG` delivers configured lifecycle messages over inproc pipes and active TCP/IPC ZMTP handshake paths. `ZMQ_DISCONNECT_MSG` delivers over inproc pipes.

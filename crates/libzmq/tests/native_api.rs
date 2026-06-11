@@ -148,6 +148,25 @@ fn native_pair_tcp_hello_msg_delivers_before_first_payload() {
 }
 
 #[test]
+fn native_tcp_probe_router_sends_empty_message_before_payload() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let router = ctx.socket(SocketType::Router).unwrap();
+    let dealer = ctx.socket(SocketType::Dealer).unwrap();
+
+    dealer.set_option_i32(ZMQ_PROBE_ROUTER, 1).unwrap();
+    router.bind(&endpoint).unwrap();
+    dealer.connect(&endpoint).unwrap();
+
+    assert_eq!(dealer.send("payload").unwrap(), 7);
+    let received = recv_retry_native(&router).unwrap();
+    assert!(received.data().is_empty());
+    let received = recv_retry_native(&router).unwrap();
+    assert_eq!(received.data(), b"payload");
+}
+
+#[test]
 fn native_pair_ws_round_trip() {
     let port = unused_tcp_port();
     let endpoint = format!("ws://127.0.0.1:{port}/zmq");
@@ -874,6 +893,31 @@ fn native_pair_ipc_hello_msg_delivers_before_first_payload() {
     let received = server.recv().unwrap();
     assert_eq!(received.data(), b"hello");
     let received = server.recv().unwrap();
+    assert_eq!(received.data(), b"payload");
+    let _ = std::fs::remove_file(path);
+}
+
+#[cfg(unix)]
+#[test]
+fn native_ipc_probe_router_sends_empty_message_before_payload() {
+    let path = std::env::temp_dir().join(format!(
+        "libzmq-native-ipc-{}-probe-router.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let endpoint = format!("ipc://{}", path.display());
+    let ctx = Context::new().unwrap();
+    let router = ctx.socket(SocketType::Router).unwrap();
+    let dealer = ctx.socket(SocketType::Dealer).unwrap();
+
+    dealer.set_option_i32(ZMQ_PROBE_ROUTER, 1).unwrap();
+    router.bind(&endpoint).unwrap();
+    dealer.connect(&endpoint).unwrap();
+
+    assert_eq!(dealer.send("payload").unwrap(), 7);
+    let received = router.recv().unwrap();
+    assert!(received.data().is_empty());
+    let received = router.recv().unwrap();
     assert_eq!(received.data(), b"payload");
     let _ = std::fs::remove_file(path);
 }
