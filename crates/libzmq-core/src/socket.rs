@@ -2,6 +2,8 @@ use crate::constants::*;
 use crate::context::{
     ContextShared, InprocEndpoint, MessageQueue, SubscriptionSet, SubscriptionState, WelcomeMessage,
 };
+#[cfg(feature = "norm")]
+use crate::transport::NormEndpoint;
 use crate::transport::{
     IpcEndpoint, TcpEndpoint, UdpEndpoint, WsEndpoint, ZmtpFrame, ZmtpGreeting, ZmtpMetadata,
 };
@@ -105,6 +107,8 @@ pub struct Socket {
     tcp: Mutex<TcpState>,
     ipc: Mutex<IpcState>,
     udp: Mutex<UdpState>,
+    #[cfg(feature = "norm")]
+    norm: Mutex<NormState>,
     ws: Mutex<WsState>,
     #[cfg(feature = "wss")]
     wss: Mutex<WssState>,
@@ -162,6 +166,17 @@ struct UdpState {
     bound_endpoint: Option<UdpEndpoint>,
     connected_endpoint: Option<UdpEndpoint>,
     last_peer: Option<SocketAddr>,
+}
+
+#[cfg(feature = "norm")]
+#[derive(Debug, Default)]
+struct NormState {
+    sender_session: Option<libzmq_sys::norm::Session>,
+    sender_instance: Option<libzmq_sys::norm::Instance>,
+    receiver_session: Option<libzmq_sys::norm::Session>,
+    receiver_instance: Option<libzmq_sys::norm::Instance>,
+    bound_endpoint: Option<NormEndpoint>,
+    connected_endpoint: Option<NormEndpoint>,
 }
 
 #[derive(Debug, Default)]
@@ -355,9 +370,53 @@ struct SocketOptions {
     linger: i32,
     sndhwm: i32,
     rcvhwm: i32,
+    affinity: u64,
+    maxmsgsize: i64,
+    routing_id: Vec<u8>,
+    connect_routing_id: Vec<u8>,
+    last_endpoint: Vec<u8>,
+    socks_proxy: Vec<u8>,
+    socks_username: Vec<u8>,
+    socks_password: Vec<u8>,
+    bind_to_device: Vec<u8>,
+    hello_msg: Vec<u8>,
+    disconnect_msg: Vec<u8>,
+    hiccup_msg: Vec<u8>,
+    rate: i32,
+    recovery_ivl: i32,
+    sndbuf: i32,
+    rcvbuf: i32,
+    reconnect_ivl: i32,
+    reconnect_ivl_max: i32,
+    reconnect_stop: i32,
+    backlog: i32,
+    priority: i32,
+    in_batch_size: i32,
+    out_batch_size: i32,
+    busy_poll: i32,
+    multicast_hops: i32,
+    multicast_maxtpdu: i32,
+    multicast_loop: bool,
+    tos: i32,
+    connect_timeout: i32,
+    tcp_maxrt: i32,
+    tcp_keepalive: i32,
+    tcp_keepalive_cnt: i32,
+    tcp_keepalive_idle: i32,
+    tcp_keepalive_intvl: i32,
+    handshake_ivl: i32,
+    heartbeat_ivl: i32,
+    heartbeat_ttl: i32,
+    heartbeat_timeout: i32,
+    use_fd: i32,
     sndtimeo: i32,
     rcvtimeo: i32,
+    ipv6: bool,
+    immediate: bool,
+    invert_matching: bool,
+    loopback_fastpath: bool,
     conflate: bool,
+    probe_router: bool,
     router_mandatory: bool,
     router_handover: bool,
     req_correlate: bool,
@@ -366,6 +425,9 @@ struct SocketOptions {
     xpub_verboser: bool,
     xpub_nodrop: bool,
     xpub_manual: bool,
+    xpub_manual_last_value: bool,
+    xsub_verbose_unsubscribe: bool,
+    only_first_subscribe: bool,
     norm_mode: i32,
     norm_unicast_nack: bool,
     norm_buffer_size: i32,
@@ -402,9 +464,53 @@ impl Default for SocketOptions {
             linger: -1,
             sndhwm: 1000,
             rcvhwm: 1000,
+            affinity: 0,
+            maxmsgsize: -1,
+            routing_id: Vec::new(),
+            connect_routing_id: Vec::new(),
+            last_endpoint: Vec::new(),
+            socks_proxy: Vec::new(),
+            socks_username: Vec::new(),
+            socks_password: Vec::new(),
+            bind_to_device: Vec::new(),
+            hello_msg: Vec::new(),
+            disconnect_msg: Vec::new(),
+            hiccup_msg: Vec::new(),
+            rate: 100,
+            recovery_ivl: 10000,
+            sndbuf: -1,
+            rcvbuf: -1,
+            reconnect_ivl: 100,
+            reconnect_ivl_max: 0,
+            reconnect_stop: 0,
+            backlog: 100,
+            priority: 0,
+            in_batch_size: 8192,
+            out_batch_size: 8192,
+            busy_poll: 0,
+            multicast_hops: 1,
+            multicast_maxtpdu: 1500,
+            multicast_loop: true,
+            tos: 0,
+            connect_timeout: 0,
+            tcp_maxrt: 0,
+            tcp_keepalive: -1,
+            tcp_keepalive_cnt: -1,
+            tcp_keepalive_idle: -1,
+            tcp_keepalive_intvl: -1,
+            handshake_ivl: 30000,
+            heartbeat_ivl: 0,
+            heartbeat_ttl: 0,
+            heartbeat_timeout: -1,
+            use_fd: -1,
             sndtimeo: -1,
             rcvtimeo: -1,
+            ipv6: false,
+            immediate: false,
+            invert_matching: false,
+            loopback_fastpath: false,
             conflate: false,
+            probe_router: false,
             router_mandatory: false,
             router_handover: false,
             req_correlate: false,
@@ -413,6 +519,9 @@ impl Default for SocketOptions {
             xpub_verboser: false,
             xpub_nodrop: false,
             xpub_manual: false,
+            xpub_manual_last_value: false,
+            xsub_verbose_unsubscribe: false,
+            only_first_subscribe: false,
             norm_mode: ZMQ_NORM_CC,
             norm_unicast_nack: false,
             norm_buffer_size: 2048,
@@ -536,6 +645,8 @@ impl Socket {
             tcp: Mutex::new(TcpState::default()),
             ipc: Mutex::new(IpcState::default()),
             udp: Mutex::new(UdpState::default()),
+            #[cfg(feature = "norm")]
+            norm: Mutex::new(NormState::default()),
             ws: Mutex::new(WsState::default()),
             #[cfg(feature = "wss")]
             wss: Mutex::new(WssState::default()),
@@ -569,6 +680,9 @@ impl Socket {
         if endpoint.starts_with("udp://") {
             return self.bind_udp(endpoint);
         }
+        if endpoint.starts_with("norm://") {
+            return self.bind_norm(endpoint);
+        }
         if endpoint.starts_with("ws://") {
             return self.bind_ws(endpoint);
         }
@@ -592,6 +706,7 @@ impl Socket {
             inproc.bound_endpoint = Some(bound);
         }
         self.emit_monitor_event(ZMQ_EVENT_LISTENING, 0, endpoint)?;
+        self.set_last_endpoint(endpoint)?;
         Ok(())
     }
 
@@ -604,6 +719,9 @@ impl Socket {
         }
         if endpoint.starts_with("udp://") {
             return self.unbind_udp(endpoint);
+        }
+        if endpoint.starts_with("norm://") {
+            return self.unbind_norm(endpoint);
         }
         if endpoint.starts_with("ws://") {
             return self.unbind_ws(endpoint);
@@ -637,6 +755,9 @@ impl Socket {
         if endpoint.starts_with("udp://") {
             return self.connect_udp(endpoint);
         }
+        if endpoint.starts_with("norm://") {
+            return self.connect_norm(endpoint);
+        }
         if endpoint.starts_with("ws://") {
             return self.connect_ws(endpoint);
         }
@@ -658,7 +779,9 @@ impl Socket {
             inproc.connected_endpoint = Some(endpoint_name.to_string());
             inproc.direct_outbox = bound.map(|bound| bound.binder_inbox());
         }
+        self.send_inproc_probe_router()?;
         self.emit_monitor_event(ZMQ_EVENT_CONNECTED, 0, endpoint)?;
+        self.set_last_endpoint(endpoint)?;
         Ok(())
     }
 
@@ -671,6 +794,9 @@ impl Socket {
         }
         if endpoint.starts_with("udp://") {
             return self.disconnect_udp(endpoint);
+        }
+        if endpoint.starts_with("norm://") {
+            return self.disconnect_norm(endpoint);
         }
         if endpoint.starts_with("ws://") {
             return self.disconnect_ws(endpoint);
@@ -692,6 +818,21 @@ impl Socket {
         }
         self.emit_monitor_event(ZMQ_EVENT_DISCONNECTED, 0, endpoint)?;
         Ok(())
+    }
+
+    pub fn disconnect_peer(&self, routing_id: u32) -> Result<()> {
+        if !matches!(self.socket_type, SocketType::Server | SocketType::Peer) {
+            return Err(Error::NotSupported);
+        }
+        let inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
+        let Some(bound_endpoint) = &inproc.bound_endpoint else {
+            return Err(Error::HostUnreachable);
+        };
+        if bound_endpoint.remove_peer(routing_id as usize)? {
+            Ok(())
+        } else {
+            Err(Error::HostUnreachable)
+        }
     }
 
     pub fn monitor(&self, endpoint: &str, events: u64) -> Result<()> {
@@ -738,6 +879,11 @@ impl Socket {
         };
         if self.has_udp_transport()? {
             self.send_udp_datagram(&message)?;
+            self.after_pattern_send(message.more())?;
+            return Ok(size);
+        }
+        if self.has_norm_transport()? {
+            self.send_norm_data(&message)?;
             self.after_pattern_send(message.more())?;
             return Ok(size);
         }
@@ -789,6 +935,11 @@ impl Socket {
             {
                 return Err(Error::HostUnreachable);
             }
+            if matches!(self.socket_type, SocketType::Server | SocketType::Peer)
+                && message.routing_id() != 0
+            {
+                return Err(Error::HostUnreachable);
+            }
             return Err(Error::Again);
         }
         let options = self
@@ -820,6 +971,11 @@ impl Socket {
         }
         if self.has_udp_transport()? {
             let message = self.recv_udp_datagram()?;
+            self.after_pattern_recv(message.more())?;
+            return Ok(message);
+        }
+        if self.has_norm_transport()? {
+            let message = self.recv_norm_data()?;
             self.after_pattern_recv(message.more())?;
             return Ok(message);
         }
@@ -998,19 +1154,58 @@ impl Socket {
     pub fn set_option_i32(&self, option: i32, value: i32) -> Result<()> {
         let mut options = self.options.lock().map_err(|_| Error::InvalidSocket)?;
         match option {
-            ZMQ_LINGER => options.linger = value,
+            ZMQ_LINGER if value >= -1 => options.linger = value,
             ZMQ_SNDHWM if value >= 0 => {
                 options.sndhwm = value;
                 self.inproc_fast_send_enabled
                     .store(false, Ordering::Relaxed);
             }
             ZMQ_RCVHWM if value >= 0 => options.rcvhwm = value,
+            ZMQ_RATE if value > 0 => options.rate = value,
+            ZMQ_RECOVERY_IVL if value >= 0 => options.recovery_ivl = value,
+            ZMQ_SNDBUF if value >= -1 => options.sndbuf = value,
+            ZMQ_RCVBUF if value >= -1 => options.rcvbuf = value,
+            ZMQ_RECONNECT_IVL if value >= -1 => options.reconnect_ivl = value,
+            ZMQ_RECONNECT_IVL_MAX if value >= 0 => options.reconnect_ivl_max = value,
+            ZMQ_RECONNECT_STOP => options.reconnect_stop = value,
+            ZMQ_BACKLOG if value >= 0 => options.backlog = value,
+            ZMQ_PRIORITY if value >= 0 => options.priority = value,
+            ZMQ_IN_BATCH_SIZE if value > 0 => options.in_batch_size = value,
+            ZMQ_OUT_BATCH_SIZE if value > 0 => options.out_batch_size = value,
+            ZMQ_BUSY_POLL => options.busy_poll = value,
+            ZMQ_MULTICAST_HOPS if value > 0 => options.multicast_hops = value,
+            ZMQ_MULTICAST_MAXTPDU if value > 0 => options.multicast_maxtpdu = value,
+            ZMQ_MULTICAST_LOOP => options.multicast_loop = value != 0,
+            ZMQ_TOS if value >= 0 => options.tos = value,
+            ZMQ_CONNECT_TIMEOUT if value >= 0 => options.connect_timeout = value,
+            ZMQ_TCP_MAXRT if value >= 0 => options.tcp_maxrt = value,
+            ZMQ_TCP_KEEPALIVE if matches!(value, -1..=1) => options.tcp_keepalive = value,
+            ZMQ_TCP_KEEPALIVE_CNT if value >= -1 => options.tcp_keepalive_cnt = value,
+            ZMQ_TCP_KEEPALIVE_IDLE if value >= -1 => options.tcp_keepalive_idle = value,
+            ZMQ_TCP_KEEPALIVE_INTVL if value >= -1 => options.tcp_keepalive_intvl = value,
+            ZMQ_HANDSHAKE_IVL if value >= 0 => options.handshake_ivl = value,
+            ZMQ_HEARTBEAT_IVL if value >= 0 => options.heartbeat_ivl = value,
+            ZMQ_HEARTBEAT_TTL if value >= 0 && value / 100 <= u16::MAX as i32 => {
+                options.heartbeat_ttl = (value / 100) * 100;
+            }
+            ZMQ_HEARTBEAT_TIMEOUT if value >= 0 => options.heartbeat_timeout = value,
+            ZMQ_USE_FD if value >= -1 => options.use_fd = value,
             ZMQ_SNDTIMEO if value >= -1 => options.sndtimeo = value,
             ZMQ_RCVTIMEO if value >= -1 => options.rcvtimeo = value,
+            ZMQ_IPV6 if matches!(value, 0 | 1) => options.ipv6 = value != 0,
+            ZMQ_IMMEDIATE if matches!(value, 0 | 1) => options.immediate = value != 0,
+            ZMQ_INVERT_MATCHING => options.invert_matching = value != 0,
+            ZMQ_LOOPBACK_FASTPATH => options.loopback_fastpath = value != 0,
             ZMQ_CONFLATE => {
                 options.conflate = value != 0;
                 self.inproc_fast_send_enabled
                     .store(false, Ordering::Relaxed);
+            }
+            ZMQ_PROBE_ROUTER
+                if matches!(self.socket_type, SocketType::Dealer | SocketType::Router)
+                    && value >= 0 =>
+            {
+                options.probe_router = value != 0;
             }
             ZMQ_ROUTER_MANDATORY => options.router_mandatory = value != 0,
             ZMQ_ROUTER_HANDOVER => options.router_handover = value != 0,
@@ -1020,6 +1215,19 @@ impl Socket {
             ZMQ_XPUB_VERBOSER => options.xpub_verboser = value != 0,
             ZMQ_XPUB_NODROP => options.xpub_nodrop = value != 0,
             ZMQ_XPUB_MANUAL => options.xpub_manual = value != 0,
+            ZMQ_XPUB_MANUAL_LAST_VALUE if self.socket_type == SocketType::Xpub && value >= 0 => {
+                options.xpub_manual = value != 0;
+                options.xpub_manual_last_value = value != 0;
+            }
+            ZMQ_ONLY_FIRST_SUBSCRIBE
+                if matches!(self.socket_type, SocketType::Xpub | SocketType::Xsub)
+                    && value >= 0 =>
+            {
+                options.only_first_subscribe = value != 0;
+            }
+            ZMQ_XSUB_VERBOSE_UNSUBSCRIBE if self.socket_type == SocketType::Xsub => {
+                options.xsub_verbose_unsubscribe = value != 0;
+            }
             ZMQ_NORM_MODE if (ZMQ_NORM_FIXED..=ZMQ_NORM_CCE_ECNONLY).contains(&value) => {
                 options.norm_mode = value;
             }
@@ -1043,9 +1251,37 @@ impl Socket {
                 options.security.gssapi_service_principal_nametype = value;
             }
             ZMQ_ZAP_ENFORCE_DOMAIN => options.security.zap_enforce_domain = value != 0,
-            ZMQ_SNDHWM | ZMQ_RCVHWM | ZMQ_SNDTIMEO | ZMQ_RCVTIMEO => {
-                return Err(Error::InvalidArgument)
-            }
+            ZMQ_LINGER
+            | ZMQ_SNDHWM
+            | ZMQ_RCVHWM
+            | ZMQ_RATE
+            | ZMQ_RECOVERY_IVL
+            | ZMQ_SNDBUF
+            | ZMQ_RCVBUF
+            | ZMQ_RECONNECT_IVL
+            | ZMQ_RECONNECT_IVL_MAX
+            | ZMQ_BACKLOG
+            | ZMQ_PRIORITY
+            | ZMQ_IN_BATCH_SIZE
+            | ZMQ_OUT_BATCH_SIZE
+            | ZMQ_MULTICAST_HOPS
+            | ZMQ_MULTICAST_MAXTPDU
+            | ZMQ_TOS
+            | ZMQ_CONNECT_TIMEOUT
+            | ZMQ_TCP_MAXRT
+            | ZMQ_TCP_KEEPALIVE
+            | ZMQ_TCP_KEEPALIVE_CNT
+            | ZMQ_TCP_KEEPALIVE_IDLE
+            | ZMQ_TCP_KEEPALIVE_INTVL
+            | ZMQ_HANDSHAKE_IVL
+            | ZMQ_HEARTBEAT_IVL
+            | ZMQ_HEARTBEAT_TTL
+            | ZMQ_HEARTBEAT_TIMEOUT
+            | ZMQ_USE_FD
+            | ZMQ_SNDTIMEO
+            | ZMQ_RCVTIMEO
+            | ZMQ_IPV6
+            | ZMQ_IMMEDIATE => return Err(Error::InvalidArgument),
             ZMQ_GSSAPI_PRINCIPAL_NAMETYPE | ZMQ_GSSAPI_SERVICE_PRINCIPAL_NAMETYPE => {
                 return Err(Error::InvalidArgument)
             }
@@ -1060,8 +1296,45 @@ impl Socket {
         Ok(())
     }
 
+    pub fn set_option_u64(&self, option: i32, value: u64) -> Result<()> {
+        let mut options = self.options.lock().map_err(|_| Error::InvalidSocket)?;
+        match option {
+            ZMQ_AFFINITY => options.affinity = value,
+            _ => return Err(Error::InvalidArgument),
+        }
+        Ok(())
+    }
+
+    pub fn set_option_i64(&self, option: i32, value: i64) -> Result<()> {
+        let mut options = self.options.lock().map_err(|_| Error::InvalidSocket)?;
+        match option {
+            ZMQ_MAXMSGSIZE => options.maxmsgsize = value,
+            _ => return Err(Error::InvalidArgument),
+        }
+        Ok(())
+    }
+
     pub fn set_option_bytes(&self, option: i32, value: &[u8]) -> Result<()> {
         match option {
+            ZMQ_ROUTING_ID if !value.is_empty() && value.len() <= u8::MAX as usize => {
+                self.options
+                    .lock()
+                    .map_err(|_| Error::InvalidSocket)?
+                    .routing_id = value.to_vec();
+                Ok(())
+            }
+            ZMQ_ROUTING_ID => Err(Error::InvalidArgument),
+            ZMQ_CONNECT_ROUTING_ID
+                if matches!(self.socket_type, SocketType::Router | SocketType::Stream)
+                    && !value.is_empty() =>
+            {
+                self.options
+                    .lock()
+                    .map_err(|_| Error::InvalidSocket)?
+                    .connect_routing_id = value.to_vec();
+                Ok(())
+            }
+            ZMQ_CONNECT_ROUTING_ID => Err(Error::InvalidArgument),
             ZMQ_XPUB_WELCOME_MSG if self.socket_type == SocketType::Xpub => {
                 *self.xpub_welcome.lock().map_err(|_| Error::InvalidSocket)? = Some(value.to_vec());
                 Ok(())
@@ -1139,6 +1412,62 @@ impl Socket {
                     .gssapi_service_principal,
                 value,
             ),
+            ZMQ_SOCKS_PROXY => set_bytes(
+                &mut self
+                    .options
+                    .lock()
+                    .map_err(|_| Error::InvalidSocket)?
+                    .socks_proxy,
+                value,
+            ),
+            ZMQ_SOCKS_USERNAME => set_bytes(
+                &mut self
+                    .options
+                    .lock()
+                    .map_err(|_| Error::InvalidSocket)?
+                    .socks_username,
+                value,
+            ),
+            ZMQ_SOCKS_PASSWORD => set_bytes(
+                &mut self
+                    .options
+                    .lock()
+                    .map_err(|_| Error::InvalidSocket)?
+                    .socks_password,
+                value,
+            ),
+            ZMQ_BINDTODEVICE => set_bytes(
+                &mut self
+                    .options
+                    .lock()
+                    .map_err(|_| Error::InvalidSocket)?
+                    .bind_to_device,
+                value,
+            ),
+            ZMQ_HELLO_MSG => set_bytes(
+                &mut self
+                    .options
+                    .lock()
+                    .map_err(|_| Error::InvalidSocket)?
+                    .hello_msg,
+                value,
+            ),
+            ZMQ_DISCONNECT_MSG => set_bytes(
+                &mut self
+                    .options
+                    .lock()
+                    .map_err(|_| Error::InvalidSocket)?
+                    .disconnect_msg,
+                value,
+            ),
+            ZMQ_HICCUP_MSG => set_bytes(
+                &mut self
+                    .options
+                    .lock()
+                    .map_err(|_| Error::InvalidSocket)?
+                    .hiccup_msg,
+                value,
+            ),
             _ => Err(Error::InvalidArgument),
         }
     }
@@ -1150,8 +1479,38 @@ impl Socket {
             ZMQ_LINGER => Ok(options.linger),
             ZMQ_SNDHWM => Ok(options.sndhwm),
             ZMQ_RCVHWM => Ok(options.rcvhwm),
+            ZMQ_RATE => Ok(options.rate),
+            ZMQ_RECOVERY_IVL => Ok(options.recovery_ivl),
+            ZMQ_SNDBUF => Ok(options.sndbuf),
+            ZMQ_RCVBUF => Ok(options.rcvbuf),
+            ZMQ_RECONNECT_IVL => Ok(options.reconnect_ivl),
+            ZMQ_RECONNECT_IVL_MAX => Ok(options.reconnect_ivl_max),
+            ZMQ_RECONNECT_STOP => Ok(options.reconnect_stop),
+            ZMQ_BACKLOG => Ok(options.backlog),
+            ZMQ_PRIORITY => Ok(options.priority),
+            ZMQ_IN_BATCH_SIZE => Ok(options.in_batch_size),
+            ZMQ_OUT_BATCH_SIZE => Ok(options.out_batch_size),
+            ZMQ_MULTICAST_HOPS => Ok(options.multicast_hops),
+            ZMQ_MULTICAST_MAXTPDU => Ok(options.multicast_maxtpdu),
+            ZMQ_MULTICAST_LOOP => Ok(i32::from(options.multicast_loop)),
+            ZMQ_TOS => Ok(options.tos),
+            ZMQ_CONNECT_TIMEOUT => Ok(options.connect_timeout),
+            ZMQ_TCP_MAXRT => Ok(options.tcp_maxrt),
+            ZMQ_TCP_KEEPALIVE => Ok(options.tcp_keepalive),
+            ZMQ_TCP_KEEPALIVE_CNT => Ok(options.tcp_keepalive_cnt),
+            ZMQ_TCP_KEEPALIVE_IDLE => Ok(options.tcp_keepalive_idle),
+            ZMQ_TCP_KEEPALIVE_INTVL => Ok(options.tcp_keepalive_intvl),
+            ZMQ_HANDSHAKE_IVL => Ok(options.handshake_ivl),
+            ZMQ_HEARTBEAT_IVL => Ok(options.heartbeat_ivl),
+            ZMQ_HEARTBEAT_TTL => Ok(options.heartbeat_ttl),
+            ZMQ_HEARTBEAT_TIMEOUT => Ok(options.heartbeat_timeout),
+            ZMQ_USE_FD => Ok(options.use_fd),
             ZMQ_SNDTIMEO => Ok(options.sndtimeo),
             ZMQ_RCVTIMEO => Ok(options.rcvtimeo),
+            ZMQ_IPV6 => Ok(i32::from(options.ipv6)),
+            ZMQ_IMMEDIATE => Ok(i32::from(options.immediate)),
+            ZMQ_INVERT_MATCHING => Ok(i32::from(options.invert_matching)),
+            ZMQ_LOOPBACK_FASTPATH => Ok(i32::from(options.loopback_fastpath)),
             ZMQ_CONFLATE => Ok(i32::from(options.conflate)),
             ZMQ_ROUTER_MANDATORY => Ok(i32::from(options.router_mandatory)),
             ZMQ_ROUTER_HANDOVER => Ok(i32::from(options.router_handover)),
@@ -1161,6 +1520,13 @@ impl Socket {
             ZMQ_XPUB_VERBOSER => Ok(i32::from(options.xpub_verboser)),
             ZMQ_XPUB_NODROP => Ok(i32::from(options.xpub_nodrop)),
             ZMQ_XPUB_MANUAL => Ok(i32::from(options.xpub_manual)),
+            ZMQ_TOPICS_COUNT if matches!(self.socket_type, SocketType::Xpub | SocketType::Xsub) => {
+                Ok(self
+                    .subscriptions
+                    .lock()
+                    .map_err(|_| Error::InvalidSocket)?
+                    .count() as i32)
+            }
             ZMQ_NORM_MODE => Ok(options.norm_mode),
             ZMQ_NORM_UNICAST_NACK => Ok(i32::from(options.norm_unicast_nack)),
             ZMQ_NORM_BUFFER_SIZE => Ok(options.norm_buffer_size),
@@ -1187,9 +1553,26 @@ impl Socket {
         }
     }
 
+    pub fn get_option_u64(&self, option: i32) -> Result<u64> {
+        let options = self.options.lock().map_err(|_| Error::InvalidSocket)?;
+        match option {
+            ZMQ_AFFINITY => Ok(options.affinity),
+            _ => Err(Error::InvalidArgument),
+        }
+    }
+
+    pub fn get_option_i64(&self, option: i32) -> Result<i64> {
+        let options = self.options.lock().map_err(|_| Error::InvalidSocket)?;
+        match option {
+            ZMQ_MAXMSGSIZE => Ok(options.maxmsgsize),
+            _ => Err(Error::InvalidArgument),
+        }
+    }
+
     pub fn get_option_bytes(&self, option: i32) -> Result<Vec<u8>> {
         let options = self.options.lock().map_err(|_| Error::InvalidSocket)?;
         match option {
+            ZMQ_ROUTING_ID => Ok(options.routing_id.clone()),
             ZMQ_PLAIN_USERNAME => Ok(options.security.plain_username.clone()),
             ZMQ_PLAIN_PASSWORD => Ok(options.security.plain_password.clone()),
             ZMQ_CURVE_PUBLICKEY => Ok(options.security.curve_publickey.clone()),
@@ -1198,8 +1581,49 @@ impl Socket {
             ZMQ_ZAP_DOMAIN => Ok(options.security.zap_domain.clone()),
             ZMQ_GSSAPI_PRINCIPAL => Ok(options.security.gssapi_principal.clone()),
             ZMQ_GSSAPI_SERVICE_PRINCIPAL => Ok(options.security.gssapi_service_principal.clone()),
+            ZMQ_LAST_ENDPOINT => {
+                let mut endpoint = options.last_endpoint.clone();
+                endpoint.push(0);
+                Ok(endpoint)
+            }
+            ZMQ_SOCKS_PROXY => Ok(c_string_option(&options.socks_proxy)),
+            ZMQ_SOCKS_USERNAME => Ok(c_string_option(&options.socks_username)),
+            ZMQ_SOCKS_PASSWORD => Ok(c_string_option(&options.socks_password)),
+            ZMQ_BINDTODEVICE => Ok(c_string_option(&options.bind_to_device)),
             _ => Err(Error::InvalidArgument),
         }
+    }
+
+    fn set_last_endpoint(&self, endpoint: &str) -> Result<()> {
+        self.options
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .last_endpoint = endpoint.as_bytes().to_vec();
+        Ok(())
+    }
+
+    fn send_inproc_probe_router(&self) -> Result<()> {
+        if !matches!(self.socket_type, SocketType::Dealer | SocketType::Router) {
+            return Ok(());
+        }
+        if !self
+            .options
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .probe_router
+        {
+            return Ok(());
+        }
+        let mut probe = Message::new();
+        self.apply_outgoing_routing_id(&mut probe)?;
+        let outboxes = self.resolve_outboxes(&probe)?;
+        for outbox in outboxes {
+            outbox
+                .lock()
+                .map_err(|_| Error::InvalidSocket)?
+                .push_back(probe.clone());
+        }
+        Ok(())
     }
 
     pub fn events(&self) -> Result<i16> {
@@ -1276,6 +1700,7 @@ impl Socket {
         tcp.curve_session = None;
         tcp.gssapi_session = None;
         self.emit_monitor_event(ZMQ_EVENT_LISTENING, 0, endpoint)?;
+        self.set_last_endpoint(endpoint)?;
         Ok(())
     }
 
@@ -1324,6 +1749,7 @@ impl Socket {
         tcp.curve_session = None;
         tcp.gssapi_session = None;
         self.emit_monitor_event(ZMQ_EVENT_CONNECTED, 0, endpoint)?;
+        self.set_last_endpoint(endpoint)?;
         Ok(())
     }
 
@@ -1520,6 +1946,7 @@ impl Socket {
         ipc.curve_session = None;
         ipc.gssapi_session = None;
         self.emit_monitor_event(ZMQ_EVENT_LISTENING, 0, endpoint)?;
+        self.set_last_endpoint(endpoint)?;
         Ok(())
     }
 
@@ -1558,6 +1985,7 @@ impl Socket {
         ipc.curve_session = None;
         ipc.gssapi_session = None;
         self.emit_monitor_event(ZMQ_EVENT_CONNECTED, 0, endpoint)?;
+        self.set_last_endpoint(endpoint)?;
         Ok(())
     }
 
@@ -1737,11 +2165,18 @@ impl Socket {
         }
         let parsed = UdpEndpoint::parse(endpoint)?;
         let socket = UdpSocketHandle::bind(parsed.bind_addr()).map_err(map_io_error)?;
+        let multicast_loop = self
+            .options
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .multicast_loop;
         if let Some(group) = parsed.multicast_v4() {
             socket
                 .join_multicast_v4(group, Ipv4Addr::LOCALHOST)
                 .map_err(map_io_error)?;
-            socket.set_multicast_loop_v4(true).map_err(map_io_error)?;
+            socket
+                .set_multicast_loop_v4(multicast_loop)
+                .map_err(map_io_error)?;
         }
         socket.set_nonblocking(true).map_err(map_io_error)?;
         let mut udp = self.udp.lock().map_err(|_| Error::InvalidSocket)?;
@@ -1750,6 +2185,7 @@ impl Socket {
         udp.connected_endpoint = None;
         udp.last_peer = None;
         self.emit_monitor_event(ZMQ_EVENT_LISTENING, 0, endpoint)?;
+        self.set_last_endpoint(endpoint)?;
         Ok(())
     }
 
@@ -1773,11 +2209,18 @@ impl Socket {
         }
         let parsed = UdpEndpoint::parse(endpoint)?;
         let socket = UdpSocketHandle::bind("0.0.0.0:0").map_err(map_io_error)?;
+        let multicast_loop = self
+            .options
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .multicast_loop;
         if parsed.multicast_v4().is_some() {
             socket
                 .set_multicast_if_v4(Ipv4Addr::LOCALHOST)
                 .map_err(map_io_error)?;
-            socket.set_multicast_loop_v4(true).map_err(map_io_error)?;
+            socket
+                .set_multicast_loop_v4(multicast_loop)
+                .map_err(map_io_error)?;
             socket.set_multicast_ttl_v4(1).map_err(map_io_error)?;
         }
         socket
@@ -1790,6 +2233,7 @@ impl Socket {
         udp.connected_endpoint = Some(parsed);
         udp.last_peer = None;
         self.emit_monitor_event(ZMQ_EVENT_CONNECTED, 0, endpoint)?;
+        self.set_last_endpoint(endpoint)?;
         Ok(())
     }
 
@@ -1843,6 +2287,173 @@ impl Socket {
         }
     }
 
+    #[cfg(feature = "norm")]
+    fn bind_norm(&self, endpoint: &str) -> Result<()> {
+        if self.socket_type != SocketType::Pub {
+            return Err(Error::NotSupported);
+        }
+        let parsed = NormEndpoint::parse(endpoint)?;
+        let instance = libzmq_sys::norm::Instance::new().ok_or(Error::InvalidArgument)?;
+        let config = self.norm_session_config(&parsed);
+        let mut session = instance
+            .create_session(&config)
+            .ok_or(Error::InvalidArgument)?;
+        session
+            .start_sender(&config)
+            .ok_or(Error::InvalidArgument)?;
+        let mut norm = self.norm.lock().map_err(|_| Error::InvalidSocket)?;
+        norm.sender_session = Some(session);
+        norm.sender_instance = Some(instance);
+        norm.bound_endpoint = Some(parsed);
+        self.emit_monitor_event(ZMQ_EVENT_LISTENING, 0, endpoint)?;
+        self.set_last_endpoint(endpoint)?;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "norm"))]
+    fn bind_norm(&self, _endpoint: &str) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    #[cfg(feature = "norm")]
+    fn unbind_norm(&self, endpoint: &str) -> Result<()> {
+        let parsed = NormEndpoint::parse(endpoint)?;
+        let mut norm = self.norm.lock().map_err(|_| Error::InvalidSocket)?;
+        if norm.bound_endpoint.as_ref() != Some(&parsed) {
+            return Err(Error::InvalidArgument);
+        }
+        norm.sender_session = None;
+        norm.sender_instance = None;
+        norm.bound_endpoint = None;
+        self.emit_monitor_event(ZMQ_EVENT_CLOSED, 0, endpoint)?;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "norm"))]
+    fn unbind_norm(&self, _endpoint: &str) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    #[cfg(feature = "norm")]
+    fn connect_norm(&self, endpoint: &str) -> Result<()> {
+        if self.socket_type != SocketType::Sub {
+            return Err(Error::NotSupported);
+        }
+        let parsed = NormEndpoint::parse(endpoint)?;
+        let instance = libzmq_sys::norm::Instance::new().ok_or(Error::InvalidArgument)?;
+        let config = self.norm_session_config(&parsed);
+        let mut session = instance
+            .create_session(&config)
+            .ok_or(Error::InvalidArgument)?;
+        session
+            .start_receiver(config.buffer_space)
+            .ok_or(Error::InvalidArgument)?;
+        let mut norm = self.norm.lock().map_err(|_| Error::InvalidSocket)?;
+        norm.receiver_session = Some(session);
+        norm.receiver_instance = Some(instance);
+        norm.connected_endpoint = Some(parsed);
+        self.emit_monitor_event(ZMQ_EVENT_CONNECTED, 0, endpoint)?;
+        self.set_last_endpoint(endpoint)?;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "norm"))]
+    fn connect_norm(&self, _endpoint: &str) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    #[cfg(feature = "norm")]
+    fn disconnect_norm(&self, endpoint: &str) -> Result<()> {
+        let parsed = NormEndpoint::parse(endpoint)?;
+        let mut norm = self.norm.lock().map_err(|_| Error::InvalidSocket)?;
+        if norm.connected_endpoint.as_ref() != Some(&parsed) {
+            return Err(Error::InvalidArgument);
+        }
+        norm.receiver_session = None;
+        norm.receiver_instance = None;
+        norm.connected_endpoint = None;
+        self.emit_monitor_event(ZMQ_EVENT_DISCONNECTED, 0, endpoint)?;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "norm"))]
+    fn disconnect_norm(&self, _endpoint: &str) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    #[cfg(feature = "norm")]
+    fn has_norm_transport(&self) -> Result<bool> {
+        let norm = self.norm.lock().map_err(|_| Error::InvalidSocket)?;
+        Ok(norm.sender_session.is_some() || norm.receiver_instance.is_some())
+    }
+
+    #[cfg(not(feature = "norm"))]
+    fn has_norm_transport(&self) -> Result<bool> {
+        Ok(false)
+    }
+
+    #[cfg(feature = "norm")]
+    fn send_norm_data(&self, message: &Message) -> Result<()> {
+        if message.more() {
+            return Err(Error::NotSupported);
+        }
+        let norm = self.norm.lock().map_err(|_| Error::InvalidSocket)?;
+        let session = norm.sender_session.as_ref().ok_or(Error::Again)?;
+        session
+            .send_data(message.data())
+            .ok_or(Error::InvalidArgument)
+    }
+
+    #[cfg(not(feature = "norm"))]
+    fn send_norm_data(&self, _message: &Message) -> Result<()> {
+        Err(Error::NotSupported)
+    }
+
+    #[cfg(feature = "norm")]
+    fn recv_norm_data(&self) -> Result<Message> {
+        let norm = self.norm.lock().map_err(|_| Error::InvalidSocket)?;
+        let instance = norm.receiver_instance.as_ref().ok_or(Error::Again)?;
+        for _ in 0..8 {
+            let Some(data) = instance.recv_data(Duration::from_millis(25)) else {
+                return Err(Error::Again);
+            };
+            if self
+                .subscriptions
+                .lock()
+                .map_err(|_| Error::InvalidSocket)?
+                .matches_prefix_of(&data)
+            {
+                return Ok(Message::from_vec(data));
+            }
+        }
+        Err(Error::Again)
+    }
+
+    #[cfg(not(feature = "norm"))]
+    fn recv_norm_data(&self) -> Result<Message> {
+        Err(Error::NotSupported)
+    }
+
+    #[cfg(feature = "norm")]
+    fn norm_session_config(&self, endpoint: &NormEndpoint) -> libzmq_sys::norm::SessionConfig {
+        let options = self
+            .options
+            .lock()
+            .map_err(|_| Error::InvalidSocket)
+            .map(|options| options.clone())
+            .unwrap_or_default();
+        let mut config = libzmq_sys::norm::SessionConfig::new(
+            endpoint.address(),
+            endpoint.port(),
+            self.id as u32,
+        );
+        config.buffer_space = options.norm_buffer_size.max(1) as u32 * 1024;
+        config.segment_size = options.norm_segment_size.max(1) as u16;
+        config.block_size = options.norm_block_size.clamp(1, 255) as u16;
+        config.parity_segments = options.norm_num_parity.clamp(0, 254) as u16;
+        config
+    }
+
     fn bind_ws(&self, endpoint: &str) -> Result<()> {
         if !self.supports_stream_transport() {
             return Err(Error::NotSupported);
@@ -1858,6 +2469,7 @@ impl Socket {
         ws.handshake_done = false;
         ws.client_key = None;
         self.emit_monitor_event(ZMQ_EVENT_LISTENING, 0, endpoint)?;
+        self.set_last_endpoint(endpoint)?;
         Ok(())
     }
 
@@ -1900,6 +2512,7 @@ impl Socket {
         ws.handshake_done = false;
         ws.client_key = Some(key);
         self.emit_monitor_event(ZMQ_EVENT_CONNECTED, 0, endpoint)?;
+        self.set_last_endpoint(endpoint)?;
         Ok(())
     }
 
@@ -1992,6 +2605,7 @@ impl Socket {
         wss.client_request_sent = false;
         wss.client_key = None;
         self.emit_monitor_event(ZMQ_EVENT_LISTENING, 0, endpoint)?;
+        self.set_last_endpoint(endpoint)?;
         Ok(())
     }
 
@@ -2051,6 +2665,7 @@ impl Socket {
         wss.client_request_sent = false;
         wss.client_key = Some(key);
         self.emit_monitor_event(ZMQ_EVENT_CONNECTED, 0, endpoint)?;
+        self.set_last_endpoint(endpoint)?;
         Ok(())
     }
 
@@ -4285,6 +4900,12 @@ fn set_bytes(target: &mut Vec<u8>, value: &[u8]) -> Result<()> {
     target.clear();
     target.extend_from_slice(value);
     Ok(())
+}
+
+fn c_string_option(value: &[u8]) -> Vec<u8> {
+    let mut bytes = value.to_vec();
+    bytes.push(0);
+    bytes
 }
 
 fn set_curve_key(target: &mut Vec<u8>, value: &[u8]) -> Result<()> {

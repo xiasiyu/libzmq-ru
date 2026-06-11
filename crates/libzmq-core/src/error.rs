@@ -13,6 +13,7 @@ pub enum Error {
     Again,
     InvalidState,
     HostUnreachable,
+    OutOfMemory,
     NotImplemented(&'static str),
 }
 
@@ -27,6 +28,7 @@ impl Error {
             Self::Again => EAGAIN,
             Self::InvalidState => EFSM,
             Self::HostUnreachable => EHOSTUNREACH,
+            Self::OutOfMemory => ENOMEM,
         }
     }
 }
@@ -42,6 +44,7 @@ impl fmt::Display for Error {
             Self::Again => f.write_str("resource temporarily unavailable"),
             Self::InvalidState => f.write_str("operation cannot be accomplished in current state"),
             Self::HostUnreachable => f.write_str("host unreachable"),
+            Self::OutOfMemory => f.write_str("out of memory"),
             Self::NotImplemented(name) => write!(f, "{name} is not implemented yet"),
         }
     }

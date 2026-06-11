@@ -14,7 +14,7 @@ The C ABI target is original `libzmq` 4.3.6. Public headers live in `include/` a
 
 - C++ oracle interop is covered for NULL/PLAIN/CURVE TCP cases, but real GSSAPI interop remains blocked by Kerberos environment setup.
 - Same-process `tcp_interop_oracle` and process-isolated `tcp_interop_process` pass covered NULL/PLAIN/CURVE TCP directions against CURVE-capable original C++ oracle builds.
-- `norm://`, `pgm://`, `epgm://`, `tipc://`, `vmci://`, and `vsock://` are not full socket transports yet.
+- `norm://` has a feature-gated PUB/SUB single-frame data-object path, but is not a full socket transport yet; `pgm://`, `epgm://`, `tipc://`, `vmci://`, and `vsock://` remain unsupported socket transports.
 - Windows DLL export validation has not been run in this macOS environment.
 
 ## Validation Commands

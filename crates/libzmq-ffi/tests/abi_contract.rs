@@ -3,8 +3,8 @@
 // These C ABI tests intentionally exercise raw-pointer and MaybeUninit boundaries.
 // Production unsafe auditing is enforced by `unsafe-report` against crate source.
 
-use std::ffi::CStr;
 use std::ffi::{c_char, c_int, c_void};
+use std::ffi::{CStr, CString};
 use std::mem::{align_of, size_of, MaybeUninit};
 use std::net::{TcpListener, UdpSocket};
 use std::ptr;
@@ -51,11 +51,29 @@ const ZMQ_FD: c_int = 14;
 const ZMQ_EVENTS: c_int = 15;
 const ZMQ_IO_THREADS: c_int = 1;
 const ZMQ_MAX_SOCKETS: c_int = 2;
+const ZMQ_AFFINITY: c_int = 4;
+const ZMQ_ROUTING_ID: c_int = 5;
 const ZMQ_TYPE: c_int = 16;
 const ZMQ_LINGER: c_int = 17;
+const ZMQ_RATE: c_int = 8;
+const ZMQ_RECOVERY_IVL: c_int = 9;
+const ZMQ_SNDBUF: c_int = 11;
+const ZMQ_RCVBUF: c_int = 12;
+const ZMQ_RECONNECT_IVL: c_int = 18;
+const ZMQ_BACKLOG: c_int = 19;
+const ZMQ_RECONNECT_IVL_MAX: c_int = 21;
+const ZMQ_MAXMSGSIZE: c_int = 22;
 const ZMQ_SNDHWM: c_int = 23;
 const ZMQ_RCVHWM: c_int = 24;
+const ZMQ_MULTICAST_HOPS: c_int = 25;
+const ZMQ_LAST_ENDPOINT: c_int = 32;
 const ZMQ_ROUTER_MANDATORY: c_int = 33;
+const ZMQ_TCP_KEEPALIVE: c_int = 34;
+const ZMQ_TCP_KEEPALIVE_CNT: c_int = 35;
+const ZMQ_TCP_KEEPALIVE_IDLE: c_int = 36;
+const ZMQ_TCP_KEEPALIVE_INTVL: c_int = 37;
+const ZMQ_IMMEDIATE: c_int = 39;
+const ZMQ_IPV6: c_int = 42;
 const ZMQ_MECHANISM: c_int = 43;
 const ZMQ_PLAIN_SERVER: c_int = 44;
 const ZMQ_PLAIN_USERNAME: c_int = 45;
@@ -64,14 +82,42 @@ const ZMQ_CURVE_SERVER: c_int = 47;
 const ZMQ_CURVE_PUBLICKEY: c_int = 48;
 const ZMQ_CURVE_SECRETKEY: c_int = 49;
 const ZMQ_CURVE_SERVERKEY: c_int = 50;
+const ZMQ_PROBE_ROUTER: c_int = 51;
 const ZMQ_REQ_RELAXED: c_int = 53;
 const ZMQ_CONFLATE: c_int = 54;
 const ZMQ_ZAP_DOMAIN: c_int = 55;
+const ZMQ_TOS: c_int = 57;
+const ZMQ_CONNECT_ROUTING_ID: c_int = 61;
 const ZMQ_GSSAPI_SERVER: c_int = 62;
 const ZMQ_GSSAPI_PRINCIPAL: c_int = 63;
 const ZMQ_GSSAPI_SERVICE_PRINCIPAL: c_int = 64;
 const ZMQ_SUBSCRIBE: c_int = 6;
+const ZMQ_UNSUBSCRIBE: c_int = 7;
+const ZMQ_HANDSHAKE_IVL: c_int = 66;
+const ZMQ_SOCKS_PROXY: c_int = 68;
+const ZMQ_LOOPBACK_FASTPATH: c_int = 94;
 const ZMQ_XPUB_WELCOME_MSG: c_int = 72;
+const ZMQ_INVERT_MATCHING: c_int = 74;
+const ZMQ_HEARTBEAT_IVL: c_int = 75;
+const ZMQ_HEARTBEAT_TTL: c_int = 76;
+const ZMQ_HEARTBEAT_TIMEOUT: c_int = 77;
+const ZMQ_CONNECT_TIMEOUT: c_int = 79;
+const ZMQ_TCP_MAXRT: c_int = 80;
+const ZMQ_MULTICAST_MAXTPDU: c_int = 84;
+const ZMQ_USE_FD: c_int = 89;
+const ZMQ_BINDTODEVICE: c_int = 92;
+const ZMQ_MULTICAST_LOOP: c_int = 96;
+const ZMQ_XPUB_MANUAL_LAST_VALUE: c_int = 98;
+const ZMQ_IN_BATCH_SIZE: c_int = 101;
+const ZMQ_OUT_BATCH_SIZE: c_int = 102;
+const ZMQ_RECONNECT_STOP: c_int = 109;
+const ZMQ_HELLO_MSG: c_int = 110;
+const ZMQ_DISCONNECT_MSG: c_int = 111;
+const ZMQ_PRIORITY: c_int = 112;
+const ZMQ_BUSY_POLL: c_int = 113;
+const ZMQ_HICCUP_MSG: c_int = 114;
+const ZMQ_XSUB_VERBOSE_UNSUBSCRIBE: c_int = 115;
+const ZMQ_TOPICS_COUNT: c_int = 116;
 const ZMQ_NORM_MODE: c_int = 117;
 const ZMQ_NORM_UNICAST_NACK: c_int = 118;
 const ZMQ_NORM_BUFFER_SIZE: c_int = 119;
@@ -89,6 +135,9 @@ const ZMQ_CURVE: c_int = 2;
 const ZMQ_GSSAPI: c_int = 3;
 const ZMQ_NORM_CC: c_int = 1;
 const ZMQ_NORM_CCE: c_int = 3;
+const ZMQ_QUEUE: c_int = 3;
+const ZMQ_SOCKS_USERNAME: c_int = 99;
+const ZMQ_SOCKS_PASSWORD: c_int = 100;
 
 static FREE_CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
 static TIMER_CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -121,6 +170,33 @@ fn version_api_matches_libzmq_baseline() {
     zmq_version(&mut major, &mut minor, &mut patch);
 
     assert_eq!((major, minor, patch), (4, 3, 6));
+}
+
+#[test]
+fn zmq_has_reports_available_capabilities() {
+    assert_eq!(has_capability("ipc"), i32::from(cfg!(feature = "ipc")));
+    assert_eq!(has_capability("curve"), 1);
+    assert_eq!(has_capability("draft"), 1);
+    assert_eq!(has_capability("WS"), 1);
+    assert_eq!(has_capability("WSS"), i32::from(cfg!(feature = "wss")));
+    assert_eq!(
+        has_capability("gssapi"),
+        i32::from(cfg!(feature = "gssapi"))
+    );
+    assert_eq!(has_capability("pgm"), 0);
+    assert_eq!(has_capability("epgm"), 0);
+    assert_eq!(has_capability("norm"), i32::from(cfg!(feature = "norm")));
+    assert_eq!(has_capability("tipc"), 0);
+    assert_eq!(has_capability("vmci"), 0);
+    assert_eq!(has_capability("vsock"), 0);
+    assert_eq!(has_capability("tcp"), 0);
+    assert_eq!(has_capability("unknown"), 0);
+    assert_eq!(zmq_has(ptr::null()), 0);
+}
+
+fn has_capability(name: &str) -> i32 {
+    let name = CString::new(name).unwrap();
+    zmq_has(name.as_ptr())
 }
 
 #[test]
@@ -239,16 +315,19 @@ fn message_lifecycle_matrix_preserves_size_and_close_behavior() {
 }
 
 #[test]
-fn message_more_get_and_set_are_consistent() {
+fn message_more_get_and_set_match_original_semantics() {
     let mut msg = MaybeUninit::<zmq_msg_t>::uninit();
     assert_eq!(zmq_msg_init(msg.as_mut_ptr()), 0);
     let mut msg = unsafe { msg.assume_init() };
 
     assert_eq!(zmq_msg_more(&msg), 0);
     assert_eq!(zmq_msg_get(&msg, ZMQ_MORE), 0);
-    assert_eq!(zmq_msg_set(&mut msg, ZMQ_MORE, 1), 0);
-    assert_eq!(zmq_msg_more(&msg), 1);
-    assert_eq!(zmq_msg_get(&msg, ZMQ_MORE), 1);
+    assert_eq!(zmq_msg_set(&mut msg, ZMQ_MORE, 1), -1);
+    assert_eq!(zmq_errno(), EINVAL);
+    assert_eq!(zmq_msg_more(&msg), 0);
+    assert_eq!(zmq_msg_get(&msg, ZMQ_MORE), 0);
+    assert_eq!(zmq_msg_get(&msg, 999), -1);
+    assert_eq!(zmq_errno(), EINVAL);
 
     assert_eq!(zmq_msg_close(&mut msg), 0);
 }
@@ -1503,6 +1582,77 @@ fn pair_inproc_multipart_more_state_over_c_abi() {
 }
 
 #[test]
+fn iovec_send_and_recv_preserve_multipart_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let sender = zmq_socket(ctx, ZMQ_PAIR);
+    let receiver = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!sender.is_null());
+    assert!(!receiver.is_null());
+
+    let endpoint = c"inproc://c_iovec";
+    assert_eq!(zmq_bind(receiver, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(sender, endpoint.as_ptr()), 0);
+
+    let first = b"hello";
+    let second = b"world";
+    let mut send_iov = [
+        Iovec {
+            iov_base: first.as_ptr() as *mut c_void,
+            iov_len: first.len(),
+        },
+        Iovec {
+            iov_base: second.as_ptr() as *mut c_void,
+            iov_len: second.len(),
+        },
+    ];
+    assert_eq!(
+        zmq_sendiov(sender, send_iov.as_mut_ptr(), send_iov.len(), ZMQ_SNDMORE),
+        5
+    );
+
+    let mut recv_iov = [
+        Iovec {
+            iov_base: ptr::null_mut(),
+            iov_len: 0,
+        },
+        Iovec {
+            iov_base: ptr::null_mut(),
+            iov_len: 0,
+        },
+    ];
+    let mut count = recv_iov.len();
+    assert_eq!(
+        zmq_recviov(receiver, recv_iov.as_mut_ptr(), &mut count, 0),
+        2
+    );
+    assert_eq!(count, 2);
+    assert_eq!(recv_iov[0].iov_len, first.len());
+    assert_eq!(recv_iov[1].iov_len, second.len());
+    unsafe {
+        assert_eq!(
+            std::slice::from_raw_parts(recv_iov[0].iov_base.cast::<u8>(), first.len()),
+            first
+        );
+        assert_eq!(
+            std::slice::from_raw_parts(recv_iov[1].iov_base.cast::<u8>(), second.len()),
+            second
+        );
+        libc::free(recv_iov[0].iov_base);
+        libc::free(recv_iov[1].iov_base);
+    }
+
+    assert_eq!(zmq_sendiov(sender, ptr::null_mut(), 1, 0), -1);
+    assert_eq!(zmq_errno(), EINVAL);
+    assert_eq!(zmq_recviov(receiver, ptr::null_mut(), &mut count, 0), -1);
+    assert_eq!(zmq_errno(), EINVAL);
+
+    assert_eq!(zmq_close(sender), 0);
+    assert_eq!(zmq_close(receiver), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
 fn pair_inproc_msg_send_recv_over_c_abi() {
     let ctx = zmq_ctx_new();
     assert!(!ctx.is_null());
@@ -1721,6 +1871,67 @@ fn dealer_router_inproc_sets_routing_id_over_c_abi() {
 }
 
 #[test]
+fn probe_router_inproc_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let router = zmq_socket(ctx, ZMQ_ROUTER);
+    let dealer = zmq_socket(ctx, ZMQ_DEALER);
+    let pair = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!router.is_null());
+    assert!(!dealer.is_null());
+    assert!(!pair.is_null());
+
+    let mut probe = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            dealer,
+            ZMQ_PROBE_ROUTER,
+            (&probe as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(
+            pair,
+            ZMQ_PROBE_ROUTER,
+            (&probe as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+    probe = -1;
+    assert_eq!(
+        zmq_setsockopt(
+            dealer,
+            ZMQ_PROBE_ROUTER,
+            (&probe as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+
+    let endpoint = c"inproc://c_probe_router";
+    assert_eq!(zmq_bind(router, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(dealer, endpoint.as_ptr()), 0);
+
+    let mut inbound = MaybeUninit::<zmq_msg_t>::uninit();
+    assert_eq!(zmq_msg_init(inbound.as_mut_ptr()), 0);
+    let mut inbound = unsafe { inbound.assume_init() };
+    assert_eq!(zmq_msg_recv(&mut inbound, router, 0), 0);
+    assert_eq!(zmq_msg_size(&inbound), 0);
+    assert_ne!(zmq_msg_routing_id(&mut inbound), 0);
+    assert_eq!(zmq_msg_close(&mut inbound), 0);
+
+    assert_eq!(zmq_close(pair), 0);
+    assert_eq!(zmq_close(dealer), 0);
+    assert_eq!(zmq_close(router), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
 fn server_client_inproc_round_trip_sets_routing_id_over_c_abi() {
     let ctx = zmq_ctx_new();
     assert!(!ctx.is_null());
@@ -1763,6 +1974,21 @@ fn server_client_inproc_round_trip_sets_routing_id_over_c_abi() {
         5
     );
     assert_eq!(&buffer[..5], b"reply");
+    assert_eq!(zmq_disconnect_peer(server, routing_id), 0);
+    let mut disconnected_reply = MaybeUninit::<zmq_msg_t>::uninit();
+    assert_eq!(zmq_msg_init_size(disconnected_reply.as_mut_ptr(), 4), 0);
+    let mut disconnected_reply = unsafe { disconnected_reply.assume_init() };
+    assert_eq!(
+        zmq_msg_set_routing_id(&mut disconnected_reply, routing_id),
+        0
+    );
+    assert_eq!(zmq_msg_send(&mut disconnected_reply, server, 0), -1);
+    assert_eq!(zmq_errno(), EHOSTUNREACH);
+    assert_eq!(zmq_msg_close(&mut disconnected_reply), 0);
+    assert_eq!(zmq_disconnect_peer(server, routing_id), -1);
+    assert_eq!(zmq_errno(), EHOSTUNREACH);
+    assert_eq!(zmq_disconnect_peer(client, routing_id), -1);
+    assert_eq!(zmq_errno(), ENOTSUP);
 
     assert_eq!(zmq_msg_close(&mut reply), 0);
     assert_eq!(zmq_msg_close(&mut request), 0);
@@ -1811,6 +2037,19 @@ fn peer_inproc_round_trip_sets_routing_id_over_c_abi() {
         5
     );
     assert_eq!(&buffer[..5], b"reply");
+    assert_eq!(zmq_disconnect_peer(bound, routing_id), 0);
+    let mut disconnected_reply = MaybeUninit::<zmq_msg_t>::uninit();
+    assert_eq!(zmq_msg_init_size(disconnected_reply.as_mut_ptr(), 4), 0);
+    let mut disconnected_reply = unsafe { disconnected_reply.assume_init() };
+    assert_eq!(
+        zmq_msg_set_routing_id(&mut disconnected_reply, routing_id),
+        0
+    );
+    assert_eq!(zmq_msg_send(&mut disconnected_reply, bound, 0), -1);
+    assert_eq!(zmq_errno(), EHOSTUNREACH);
+    assert_eq!(zmq_msg_close(&mut disconnected_reply), 0);
+    assert_eq!(zmq_disconnect_peer(bound, routing_id), -1);
+    assert_eq!(zmq_errno(), EHOSTUNREACH);
 
     assert_eq!(zmq_msg_close(&mut reply), 0);
     assert_eq!(zmq_msg_close(&mut request), 0);
@@ -1976,6 +2215,36 @@ fn pub_sub_inproc_filters_subscriptions_over_c_abi() {
         kept.len() as c_int
     );
     assert_eq!(&buffer[..kept.len()], kept);
+
+    assert_eq!(zmq_close(subscriber), 0);
+    assert_eq!(zmq_close(publisher), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[cfg(feature = "norm")]
+#[test]
+fn pub_sub_norm_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let publisher = zmq_socket(ctx, ZMQ_PUB);
+    let subscriber = zmq_socket(ctx, ZMQ_SUB);
+    assert!(!publisher.is_null());
+    assert!(!subscriber.is_null());
+
+    let endpoint = CString::new(format!("norm://127.0.0.1:{}", unused_udp_port())).unwrap();
+    assert_eq!(zmq_bind(publisher, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(subscriber, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_setsockopt(subscriber, ZMQ_SUBSCRIBE, ptr::null(), 0), 0);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let payload = b"norm-c";
+    assert_eq!(
+        zmq_send(publisher, payload.as_ptr().cast(), payload.len(), 0),
+        payload.len() as c_int
+    );
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(subscriber, &mut buffer), payload.len() as c_int);
+    assert_eq!(&buffer[..payload.len()], payload);
 
     assert_eq!(zmq_close(subscriber), 0);
     assert_eq!(zmq_close(publisher), 0);
@@ -2250,6 +2519,13 @@ fn monitor_and_proxy_baseline_work_over_c_abi() {
         zmq_proxy_steerable(frontend, backend, ptr::null_mut(), ptr::null_mut()),
         0
     );
+    assert_eq!(zmq_send(producer, b"dev".as_ptr().cast(), 3, 0), 3);
+    assert_eq!(zmq_device(ZMQ_QUEUE, frontend, backend), 0);
+    assert_eq!(
+        zmq_recv(consumer, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        3
+    );
+    assert_eq!(&buffer[..3], b"dev");
 
     assert_eq!(zmq_close(monitor), 0);
     assert_eq!(zmq_close(consumer), 0);
@@ -2413,6 +2689,345 @@ fn socket_options_round_trip_over_c_abi() {
     );
     assert_eq!(value, 1);
 
+    let mut affinity = 0u64;
+    size = size_of::<u64>();
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_AFFINITY,
+            (&mut affinity as *mut u64).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(affinity, 0);
+    assert_eq!(size, size_of::<u64>());
+    affinity = 0x1020_3040_5060_7080;
+    assert_eq!(
+        zmq_setsockopt(
+            socket,
+            ZMQ_AFFINITY,
+            (&affinity as *const u64).cast(),
+            size_of::<u64>()
+        ),
+        0
+    );
+    affinity = 0;
+    size = size_of::<u64>();
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_AFFINITY,
+            (&mut affinity as *mut u64).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(affinity, 0x1020_3040_5060_7080);
+
+    let mut maxmsgsize = 0i64;
+    size = size_of::<i64>();
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_MAXMSGSIZE,
+            (&mut maxmsgsize as *mut i64).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(maxmsgsize, -1);
+    assert_eq!(size, size_of::<i64>());
+    maxmsgsize = 1_048_576;
+    assert_eq!(
+        zmq_setsockopt(
+            socket,
+            ZMQ_MAXMSGSIZE,
+            (&maxmsgsize as *const i64).cast(),
+            size_of::<i64>()
+        ),
+        0
+    );
+    maxmsgsize = 0;
+    size = size_of::<i64>();
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_MAXMSGSIZE,
+            (&mut maxmsgsize as *mut i64).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(maxmsgsize, 1_048_576);
+
+    let mut routing_buffer = [0u8; 32];
+    size = routing_buffer.len();
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_ROUTING_ID,
+            routing_buffer.as_mut_ptr().cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(size, 0);
+
+    let routing_id = b"raw-routing-id";
+    assert_eq!(
+        zmq_setsockopt(
+            socket,
+            ZMQ_ROUTING_ID,
+            routing_id.as_ptr().cast(),
+            routing_id.len()
+        ),
+        0
+    );
+    size = routing_buffer.len();
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_ROUTING_ID,
+            routing_buffer.as_mut_ptr().cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(size, routing_id.len());
+    assert_eq!(&routing_buffer[..size], routing_id);
+    size = routing_id.len() - 1;
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_ROUTING_ID,
+            routing_buffer.as_mut_ptr().cast(),
+            &mut size
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+    assert_eq!(zmq_setsockopt(socket, ZMQ_ROUTING_ID, ptr::null(), 0), -1);
+    assert_eq!(zmq_errno(), EINVAL);
+    let oversized_routing_id = [b'x'; 256];
+    assert_eq!(
+        zmq_setsockopt(
+            socket,
+            ZMQ_ROUTING_ID,
+            oversized_routing_id.as_ptr().cast(),
+            oversized_routing_id.len()
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+
+    assert_eq!(
+        zmq_setsockopt(
+            socket,
+            ZMQ_CONNECT_ROUTING_ID,
+            routing_id.as_ptr().cast(),
+            routing_id.len()
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+    let router = zmq_socket(ctx, ZMQ_ROUTER);
+    assert!(!router.is_null());
+    assert_eq!(
+        zmq_setsockopt(
+            router,
+            ZMQ_CONNECT_ROUTING_ID,
+            routing_id.as_ptr().cast(),
+            routing_id.len()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(router, ZMQ_CONNECT_ROUTING_ID, ptr::null(), 0),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+    assert_eq!(zmq_close(router), 0);
+
+    value = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            socket,
+            ZMQ_AFFINITY,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+    size = size_of::<c_int>();
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_MAXMSGSIZE,
+            (&mut value as *mut c_int).cast(),
+            &mut size
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+
+    let endpoint = c"inproc://c_last_endpoint";
+    assert_eq!(zmq_bind(socket, endpoint.as_ptr()), 0);
+    let mut endpoint_buffer = [0u8; 64];
+    let mut endpoint_size = endpoint_buffer.len();
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_LAST_ENDPOINT,
+            endpoint_buffer.as_mut_ptr().cast(),
+            &mut endpoint_size
+        ),
+        0
+    );
+    assert_eq!(endpoint_size, endpoint.to_bytes_with_nul().len());
+    assert_eq!(
+        &endpoint_buffer[..endpoint_size],
+        endpoint.to_bytes_with_nul()
+    );
+    endpoint_size = endpoint.to_bytes().len();
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_LAST_ENDPOINT,
+            endpoint_buffer.as_mut_ptr().cast(),
+            &mut endpoint_size
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+    assert_eq!(
+        zmq_setsockopt(
+            socket,
+            ZMQ_LAST_ENDPOINT,
+            endpoint.as_ptr().cast(),
+            endpoint.to_bytes().len()
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+
+    for (option, expected) in [
+        (ZMQ_RATE, 100),
+        (ZMQ_RECOVERY_IVL, 10000),
+        (ZMQ_SNDBUF, -1),
+        (ZMQ_RCVBUF, -1),
+        (ZMQ_RECONNECT_IVL, 100),
+        (ZMQ_RECONNECT_IVL_MAX, 0),
+        (ZMQ_RECONNECT_STOP, 0),
+        (ZMQ_BACKLOG, 100),
+        (ZMQ_PRIORITY, 0),
+        (ZMQ_IN_BATCH_SIZE, 8192),
+        (ZMQ_OUT_BATCH_SIZE, 8192),
+        (ZMQ_LOOPBACK_FASTPATH, 0),
+        (ZMQ_MULTICAST_HOPS, 1),
+        (ZMQ_MULTICAST_MAXTPDU, 1500),
+        (ZMQ_MULTICAST_LOOP, 1),
+        (ZMQ_TOS, 0),
+        (ZMQ_CONNECT_TIMEOUT, 0),
+        (ZMQ_TCP_MAXRT, 0),
+        (ZMQ_TCP_KEEPALIVE, -1),
+        (ZMQ_TCP_KEEPALIVE_CNT, -1),
+        (ZMQ_TCP_KEEPALIVE_IDLE, -1),
+        (ZMQ_TCP_KEEPALIVE_INTVL, -1),
+        (ZMQ_HANDSHAKE_IVL, 30000),
+        (ZMQ_HEARTBEAT_IVL, 0),
+        (ZMQ_HEARTBEAT_TTL, 0),
+        (ZMQ_HEARTBEAT_TIMEOUT, -1),
+        (ZMQ_USE_FD, -1),
+        (ZMQ_IPV6, 0),
+        (ZMQ_IMMEDIATE, 0),
+        (ZMQ_INVERT_MATCHING, 0),
+    ] {
+        value = 0;
+        size = size_of::<c_int>();
+        assert_eq!(
+            zmq_getsockopt(socket, option, (&mut value as *mut c_int).cast(), &mut size),
+            0
+        );
+        assert_eq!(value, expected, "default option {option}");
+    }
+
+    for (option, new_value, expected) in [
+        (ZMQ_RATE, 200, 200),
+        (ZMQ_RECOVERY_IVL, 12, 12),
+        (ZMQ_SNDBUF, 1, 1),
+        (ZMQ_RCVBUF, 2, 2),
+        (ZMQ_RECONNECT_IVL, 33, 33),
+        (ZMQ_RECONNECT_IVL_MAX, 44, 44),
+        (ZMQ_RECONNECT_STOP, 7, 7),
+        (ZMQ_BACKLOG, 55, 55),
+        (ZMQ_PRIORITY, 3, 3),
+        (ZMQ_IN_BATCH_SIZE, 4096, 4096),
+        (ZMQ_OUT_BATCH_SIZE, 2048, 2048),
+        (ZMQ_LOOPBACK_FASTPATH, 2, 1),
+        (ZMQ_MULTICAST_HOPS, 2, 2),
+        (ZMQ_MULTICAST_MAXTPDU, 1200, 1200),
+        (ZMQ_MULTICAST_LOOP, 0, 0),
+        (ZMQ_TOS, 16, 16),
+        (ZMQ_CONNECT_TIMEOUT, 123, 123),
+        (ZMQ_TCP_MAXRT, 456, 456),
+        (ZMQ_TCP_KEEPALIVE, 1, 1),
+        (ZMQ_TCP_KEEPALIVE_CNT, 3, 3),
+        (ZMQ_TCP_KEEPALIVE_IDLE, 4, 4),
+        (ZMQ_TCP_KEEPALIVE_INTVL, 5, 5),
+        (ZMQ_HANDSHAKE_IVL, 1000, 1000),
+        (ZMQ_HEARTBEAT_IVL, 10, 10),
+        (ZMQ_HEARTBEAT_TTL, 1234, 1200),
+        (ZMQ_HEARTBEAT_TIMEOUT, 20, 20),
+        (ZMQ_USE_FD, 7, 7),
+        (ZMQ_IPV6, 1, 1),
+        (ZMQ_IMMEDIATE, 1, 1),
+        (ZMQ_INVERT_MATCHING, 2, 1),
+    ] {
+        value = new_value;
+        assert_eq!(
+            zmq_setsockopt(
+                socket,
+                option,
+                (&value as *const c_int).cast(),
+                size_of::<c_int>()
+            ),
+            0,
+            "set option {option}"
+        );
+        value = 0;
+        size = size_of::<c_int>();
+        assert_eq!(
+            zmq_getsockopt(socket, option, (&mut value as *mut c_int).cast(), &mut size),
+            0,
+            "get option {option}"
+        );
+        assert_eq!(value, expected, "round-trip option {option}");
+    }
+
+    value = -5;
+    assert_eq!(
+        zmq_setsockopt(
+            socket,
+            ZMQ_BUSY_POLL,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    size = size_of::<c_int>();
+    assert_eq!(
+        zmq_getsockopt(
+            socket,
+            ZMQ_BUSY_POLL,
+            (&mut value as *mut c_int).cast(),
+            &mut size
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+
     value = 0;
     size = size_of::<c_int>();
     assert_eq!(
@@ -2487,7 +3102,259 @@ fn socket_options_round_trip_over_c_abi() {
     );
     assert_eq!(zmq_errno(), EINVAL);
 
+    for (option, invalid_value) in [
+        (ZMQ_LINGER, -2),
+        (ZMQ_RATE, 0),
+        (ZMQ_PRIORITY, -1),
+        (ZMQ_IN_BATCH_SIZE, 0),
+        (ZMQ_OUT_BATCH_SIZE, 0),
+        (ZMQ_MULTICAST_HOPS, 0),
+        (ZMQ_TCP_KEEPALIVE, 2),
+        (ZMQ_IPV6, 2),
+        (ZMQ_IMMEDIATE, 2),
+        (ZMQ_HANDSHAKE_IVL, -1),
+        (ZMQ_HEARTBEAT_TTL, -1),
+        (ZMQ_USE_FD, -2),
+    ] {
+        value = invalid_value;
+        assert_eq!(
+            zmq_setsockopt(
+                socket,
+                option,
+                (&value as *const c_int).cast(),
+                size_of::<c_int>()
+            ),
+            -1,
+            "invalid option {option}"
+        );
+        assert_eq!(zmq_errno(), EINVAL);
+    }
+
     assert_eq!(zmq_close(socket), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn string_socket_options_round_trip_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let socket = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!socket.is_null());
+
+    for option in [
+        ZMQ_SOCKS_PROXY,
+        ZMQ_SOCKS_USERNAME,
+        ZMQ_SOCKS_PASSWORD,
+        ZMQ_BINDTODEVICE,
+    ] {
+        let mut buffer = [0xFFu8; 32];
+        let mut size = buffer.len();
+        assert_eq!(
+            zmq_getsockopt(socket, option, buffer.as_mut_ptr().cast(), &mut size),
+            0,
+            "default string option {option}"
+        );
+        assert_eq!(size, 1);
+        assert_eq!(&buffer[..size], b"\0");
+    }
+
+    for (option, value) in [
+        (ZMQ_SOCKS_PROXY, b"127.0.0.1:1080" as &[u8]),
+        (ZMQ_SOCKS_USERNAME, b"alice"),
+        (ZMQ_SOCKS_PASSWORD, b"secret"),
+        (ZMQ_BINDTODEVICE, b"lo0"),
+    ] {
+        assert_eq!(
+            zmq_setsockopt(socket, option, value.as_ptr().cast(), value.len()),
+            0,
+            "set string option {option}"
+        );
+        let mut buffer = [0u8; 32];
+        let mut size = buffer.len();
+        assert_eq!(
+            zmq_getsockopt(socket, option, buffer.as_mut_ptr().cast(), &mut size),
+            0,
+            "get string option {option}"
+        );
+        assert_eq!(size, value.len() + 1);
+        assert_eq!(&buffer[..value.len()], value);
+        assert_eq!(buffer[value.len()], 0);
+
+        size = value.len();
+        assert_eq!(
+            zmq_getsockopt(socket, option, buffer.as_mut_ptr().cast(), &mut size),
+            -1,
+            "small buffer string option {option}"
+        );
+        assert_eq!(zmq_errno(), EINVAL);
+
+        assert_eq!(zmq_setsockopt(socket, option, ptr::null(), 0), 0);
+        size = buffer.len();
+        assert_eq!(
+            zmq_getsockopt(socket, option, buffer.as_mut_ptr().cast(), &mut size),
+            0
+        );
+        assert_eq!(size, 1);
+        assert_eq!(&buffer[..size], b"\0");
+    }
+
+    assert_eq!(
+        zmq_setsockopt(socket, ZMQ_SOCKS_USERNAME, ptr::null(), 1),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+
+    assert_eq!(zmq_close(socket), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn draft_message_socket_options_set_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let socket = zmq_socket(ctx, ZMQ_DEALER);
+    assert!(!socket.is_null());
+
+    let value = b"draft-message";
+    for option in [ZMQ_HELLO_MSG, ZMQ_DISCONNECT_MSG, ZMQ_HICCUP_MSG] {
+        assert_eq!(
+            zmq_setsockopt(socket, option, value.as_ptr().cast(), value.len()),
+            0,
+            "set draft message option {option}"
+        );
+        assert_eq!(
+            zmq_setsockopt(socket, option, ptr::null(), 0),
+            0,
+            "clear draft message option {option}"
+        );
+        assert_eq!(
+            zmq_setsockopt(socket, option, ptr::null(), 1),
+            -1,
+            "reject null non-empty draft message option {option}"
+        );
+        assert_eq!(zmq_errno(), EINVAL);
+
+        let mut buffer = [0u8; 16];
+        let mut size = buffer.len();
+        assert_eq!(
+            zmq_getsockopt(socket, option, buffer.as_mut_ptr().cast(), &mut size),
+            -1,
+            "draft message option {option} is not gettable"
+        );
+        assert_eq!(zmq_errno(), EINVAL);
+    }
+
+    assert_eq!(zmq_close(socket), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn xpub_xsub_draft_options_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let xpub = zmq_socket(ctx, ZMQ_XPUB);
+    let xsub = zmq_socket(ctx, ZMQ_XSUB);
+    let pair = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!xpub.is_null());
+    assert!(!xsub.is_null());
+    assert!(!pair.is_null());
+
+    let mut value = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            xpub,
+            ZMQ_XPUB_MANUAL_LAST_VALUE,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(
+            xsub,
+            ZMQ_XSUB_VERBOSE_UNSUBSCRIBE,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    value = -1;
+    assert_eq!(
+        zmq_setsockopt(
+            xsub,
+            ZMQ_XSUB_VERBOSE_UNSUBSCRIBE,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(
+            pair,
+            ZMQ_XPUB_MANUAL_LAST_VALUE,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        -1
+    );
+    assert_eq!(zmq_errno(), EINVAL);
+
+    let mut count = -1;
+    let mut size = size_of::<c_int>();
+    assert_eq!(
+        zmq_getsockopt(
+            xsub,
+            ZMQ_TOPICS_COUNT,
+            (&mut count as *mut c_int).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(count, 0);
+    assert_eq!(
+        zmq_setsockopt(xsub, ZMQ_SUBSCRIBE, b"a".as_ptr().cast(), 1),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(xsub, ZMQ_SUBSCRIBE, b"b".as_ptr().cast(), 1),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(xsub, ZMQ_SUBSCRIBE, b"a".as_ptr().cast(), 1),
+        0
+    );
+    count = -1;
+    size = size_of::<c_int>();
+    assert_eq!(
+        zmq_getsockopt(
+            xsub,
+            ZMQ_TOPICS_COUNT,
+            (&mut count as *mut c_int).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(count, 2);
+    assert_eq!(
+        zmq_setsockopt(xsub, ZMQ_UNSUBSCRIBE, b"a".as_ptr().cast(), 1),
+        0
+    );
+    count = -1;
+    size = size_of::<c_int>();
+    assert_eq!(
+        zmq_getsockopt(
+            xsub,
+            ZMQ_TOPICS_COUNT,
+            (&mut count as *mut c_int).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(count, 1);
+
+    assert_eq!(zmq_close(pair), 0);
+    assert_eq!(zmq_close(xsub), 0);
+    assert_eq!(zmq_close(xpub), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
 

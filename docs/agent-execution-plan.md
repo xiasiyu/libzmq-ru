@@ -398,7 +398,7 @@ Goal: satisfy full confirmed feature scope.
 - [x] Implement WSS transport.
 - [ ] Implement OpenPGM FFI.
 - [ ] Implement PGM and EPGM transport.
-- [ ] Implement NORM FFI and transport.
+- [~] Implement NORM FFI and transport.
 - [ ] Implement TIPC transport.
 - [ ] Implement VMCI transport.
 - [ ] Implement VSOCK transport.
@@ -412,14 +412,14 @@ Completion checks:
 - [x] WS tests pass.
 - [x] WSS tests pass.
 - [ ] PGM tests pass where dependency exists.
-- [ ] NORM tests pass where dependency exists.
+- [~] NORM tests pass where dependency exists.
 - [ ] TIPC tests pass where platform support exists.
 - [ ] VMCI tests pass where platform support exists.
 - [ ] VSOCK tests pass where platform support exists.
 
 Status note: Phase 11 is in progress. Draft `SERVER`/`CLIENT` now work as one-to-one messaging over TCP and as routing-id-addressed messaging over inproc. Draft `PEER` now works as one-to-one messaging over TCP, routing-id-addressed messaging over inproc, and exposes `connect_peer` in the Rust API plus `zmq_connect_peer` in the C ABI. Draft `CHANNEL` now works as bidirectional one-to-one messaging over inproc/TCP/IPC using the existing ZMTP frame path. Draft `SCATTER`/`GATHER` now work as load-balanced unidirectional messaging over inproc/TCP/IPC, including wrong-direction error behavior. Draft `RADIO`/`DISH` now work over inproc with exact message-group filtering, `join`/`leave` in the Rust API, `zmq_join`/`zmq_leave` in the C ABI, and C ABI preservation of message groups through `zmq_msg_send`/`zmq_msg_recv`. Draft `DGRAM` now works over UDP unicast and IPv4 multicast using a sys-layer `UdpSocketHandle`; bound sockets reply to the last datagram peer, connected sockets use connected UDP sends, multicast receivers join `239.x.x.x` groups on loopback for local delivery, and native/C ABI tests cover unicast and multicast round trips. `ws://` transport now works with a minimal HTTP WebSocket upgrade handshake and binary WebSocket frames carrying ZMTP v3 frames; native/C ABI PAIR tests cover WS round trips. `wss://` transport now works behind the explicit `wss` feature using rustls over the WebSocket frame path with a local self-signed certificate; native/C ABI PAIR tests cover WSS under `--all-features`. WSS TLS dependencies remain feature-gated so the default Linux cross-target workspace check passes without a Linux C cross-compiler; enabling `wss` for a non-host target still requires the C toolchain needed by rustls crypto providers. Native Rust and C ABI tests cover inproc and TCP round trips, UDP `DGRAM` round trips, WS/WSS PAIR round trips, inproc `SERVER`/`CLIENT` and `PEER` routing ids, inproc `SCATTER` load balancing, and `RADIO`/`DISH` group filtering. Remaining optional transports PGM/EPGM, NORM, TIPC, VMCI, and VSOCK now have explicit `NotSupported`/`ENOTSUP` regression coverage rather than accidental fallthrough; OpenPGM and NORM development packages are not available through `pkg-config` in this environment, and TIPC/VMCI/VSOCK require platform-specific kernel/socket support before real transport tests can be enabled.
 
-Status update: NORM groundwork now exists without claiming socket transport support. The Rust core mirrors original NORM option constants/defaults/validation, parses `norm://[iface;]address:port` endpoints, links the optional `norm` feature through `libzmq-sys`, validates the installed NORM library with `NormGetVersion`, and proves a local real NORM data-object sender/receiver round trip under `cargo test -p libzmq-sys --features norm norm_`. Native and C ABI option tests cover NORM round-trips. A direct socket-level PUB/SUB data-object path was attempted and backed out because original libzmq uses a stream/event-loop engine and the direct data-object socket path was not reliable enough to expose. Actual `norm://` bind/connect still return explicit `ENOTSUP` until the original stream/event-loop semantics are implemented.
+Status update: NORM groundwork now exists with a limited feature-gated socket smoke path. The Rust core mirrors original NORM option constants/defaults/validation, parses `norm://[iface;]address:port` endpoints, links the optional `norm` feature through `libzmq-sys`, validates the installed NORM library with `NormGetVersion`, and proves local real NORM data-object sender/receiver round trips in sys, native, and C ABI tests under `--all-features`. `PUB.bind("norm://...")` plus `SUB.connect("norm://...")` supports a single-frame data-object round trip with subscription filtering. Full `norm://` socket transport parity remains incomplete because original libzmq uses stream/event-loop semantics beyond this smoke path.
 
 ## Phase 12: Performance Gate [x]
 

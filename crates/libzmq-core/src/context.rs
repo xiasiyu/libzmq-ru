@@ -98,6 +98,10 @@ impl SubscriptionState {
             .any(|len| *len <= data.len() && self.exact.contains(&data[..*len]))
     }
 
+    pub(crate) fn count(&self) -> usize {
+        self.exact.len()
+    }
+
     fn contains_exact(&self, value: &[u8]) -> bool {
         self.exact.contains(value)
     }

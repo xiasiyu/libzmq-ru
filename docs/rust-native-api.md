@@ -31,7 +31,7 @@ assert_eq!(message.data(), b"hello");
 
 - `curve`: CURVE constants/API surface.
 - `gssapi`: platform GSSAPI bindings and real token/wrap code.
-- `norm`: sys-level NORM bindings and option constants.
+- `norm`: sys-level NORM bindings, option constants, and a PUB/SUB single-frame data-object transport smoke path.
 - `wss`: TLS-over-WebSocket support through rustls.
 - `sodium`: optional libsodium acceleration for CURVE message paths.
 

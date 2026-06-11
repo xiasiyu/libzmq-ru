@@ -321,10 +321,12 @@ fn unsupported_int(name: &'static str) -> c_int {
     set_error(Error::NotImplemented(name))
 }
 
-fn is_bytes_sockopt(option: c_int) -> bool {
+fn is_settable_bytes_sockopt(option: c_int) -> bool {
     matches!(
         option,
         ZMQ_PLAIN_USERNAME
+            | ZMQ_ROUTING_ID
+            | ZMQ_CONNECT_ROUTING_ID
             | ZMQ_PLAIN_PASSWORD
             | ZMQ_CURVE_PUBLICKEY
             | ZMQ_CURVE_SECRETKEY
@@ -332,7 +334,23 @@ fn is_bytes_sockopt(option: c_int) -> bool {
             | ZMQ_ZAP_DOMAIN
             | ZMQ_GSSAPI_PRINCIPAL
             | ZMQ_GSSAPI_SERVICE_PRINCIPAL
+            | ZMQ_SOCKS_PROXY
+            | ZMQ_SOCKS_USERNAME
+            | ZMQ_SOCKS_PASSWORD
+            | ZMQ_BINDTODEVICE
+            | ZMQ_HELLO_MSG
+            | ZMQ_DISCONNECT_MSG
+            | ZMQ_HICCUP_MSG
     )
+}
+
+fn is_gettable_bytes_sockopt(option: c_int) -> bool {
+    is_settable_bytes_sockopt(option)
+        && !matches!(
+            option,
+            ZMQ_CONNECT_ROUTING_ID | ZMQ_HELLO_MSG | ZMQ_DISCONNECT_MSG | ZMQ_HICCUP_MSG
+        )
+        || option == ZMQ_LAST_ENDPOINT
 }
 
 fn write_msg_inner(msg: *mut zmq_msg_t, inner: *mut FfiMessageInner) {
@@ -782,7 +800,7 @@ pub extern "C" fn zmq_msg_get(msg: *const zmq_msg_t, _property: c_int) -> c_int 
                 clear_errno();
                 0
             }
-            _ => unsupported_int("zmq_msg_get"),
+            _ => set_error(Error::InvalidArgument),
         }
     }
 }
@@ -796,17 +814,7 @@ pub extern "C" fn zmq_msg_set(msg: *mut zmq_msg_t, _property: c_int, _optval: c_
     if inner.is_null() {
         return set_error(Error::InvalidArgument);
     }
-    // SAFETY: Non-null message inner pointer is owned by the zmq_msg_t until close/move.
-    unsafe {
-        match _property {
-            ZMQ_MORE => {
-                (*inner).more = _optval != 0;
-                clear_errno();
-                0
-            }
-            _ => unsupported_int("zmq_msg_set"),
-        }
-    }
+    set_error(Error::InvalidArgument)
 }
 
 #[no_mangle]
@@ -937,7 +945,7 @@ pub extern "C" fn zmq_setsockopt(
             Err(error) => set_error(error),
         };
     }
-    if is_bytes_sockopt(option) || option == ZMQ_XPUB_WELCOME_MSG {
+    if is_settable_bytes_sockopt(option) || option == ZMQ_XPUB_WELCOME_MSG {
         if optval.is_null() && optvallen != 0 {
             return set_error(Error::InvalidArgument);
         }
@@ -948,6 +956,34 @@ pub extern "C" fn zmq_setsockopt(
             unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), optvallen) }
         };
         return match socket.inner.set_option_bytes(option, value) {
+            Ok(()) => {
+                clear_errno();
+                0
+            }
+            Err(error) => set_error(error),
+        };
+    }
+    if option == ZMQ_AFFINITY {
+        if optval.is_null() || optvallen != std::mem::size_of::<u64>() {
+            return set_error(Error::InvalidArgument);
+        }
+        // SAFETY: `optval` is non-null and `optvallen` matches `u64` size.
+        let value = unsafe { *(optval.cast::<u64>()) };
+        return match socket.inner.set_option_u64(option, value) {
+            Ok(()) => {
+                clear_errno();
+                0
+            }
+            Err(error) => set_error(error),
+        };
+    }
+    if option == ZMQ_MAXMSGSIZE {
+        if optval.is_null() || optvallen != std::mem::size_of::<i64>() {
+            return set_error(Error::InvalidArgument);
+        }
+        // SAFETY: `optval` is non-null and `optvallen` matches `i64` size.
+        let value = unsafe { *(optval.cast::<i64>()) };
+        return match socket.inner.set_option_i64(option, value) {
             Ok(()) => {
                 clear_errno();
                 0
@@ -985,7 +1021,7 @@ pub extern "C" fn zmq_getsockopt(
     }
     // SAFETY: `optvallen` is non-null and points to caller-provided storage.
     let available = unsafe { *optvallen };
-    if is_bytes_sockopt(option) {
+    if is_gettable_bytes_sockopt(option) {
         let value = match socket.inner.get_option_bytes(option) {
             Ok(value) => value,
             Err(error) => return set_error(error),
@@ -1002,6 +1038,38 @@ pub extern "C" fn zmq_getsockopt(
         // SAFETY: `optvallen` is non-null and points to caller-provided storage.
         unsafe {
             *optvallen = value.len();
+        }
+        clear_errno();
+        return 0;
+    }
+    if option == ZMQ_AFFINITY {
+        if available != std::mem::size_of::<u64>() {
+            return set_error(Error::InvalidArgument);
+        }
+        let value = match socket.inner.get_option_u64(option) {
+            Ok(value) => value,
+            Err(error) => return set_error(error),
+        };
+        // SAFETY: `optval` and `optvallen` are non-null; caller supplied exactly `u64` space.
+        unsafe {
+            *(optval.cast::<u64>()) = value;
+            *optvallen = std::mem::size_of::<u64>();
+        }
+        clear_errno();
+        return 0;
+    }
+    if option == ZMQ_MAXMSGSIZE {
+        if available != std::mem::size_of::<i64>() {
+            return set_error(Error::InvalidArgument);
+        }
+        let value = match socket.inner.get_option_i64(option) {
+            Ok(value) => value,
+            Err(error) => return set_error(error),
+        };
+        // SAFETY: `optval` and `optvallen` are non-null; caller supplied exactly `i64` space.
+        unsafe {
+            *(optval.cast::<i64>()) = value;
+            *optvallen = std::mem::size_of::<i64>();
         }
         clear_errno();
         return 0;
@@ -1173,13 +1241,33 @@ pub extern "C" fn zmq_proxy_steerable(
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_has(_capability: *const c_char) -> c_int {
-    0
+pub extern "C" fn zmq_has(capability: *const c_char) -> c_int {
+    if capability.is_null() {
+        return 0;
+    }
+    // SAFETY: `zmq_has` follows the C ABI contract: callers pass a valid
+    // NUL-terminated capability string.
+    let capability = unsafe { CStr::from_ptr(capability) }.to_bytes();
+    let available = match capability {
+        b"ipc" => cfg!(feature = "ipc"),
+        b"pgm" => false,
+        b"tipc" => false,
+        b"norm" => cfg!(feature = "norm"),
+        b"curve" => true,
+        b"gssapi" => cfg!(feature = "gssapi"),
+        b"vmci" => false,
+        b"draft" => true,
+        b"WS" => true,
+        b"WSS" => cfg!(feature = "wss"),
+        b"vsock" => false,
+        _ => false,
+    };
+    i32::from(available)
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_device(_type: c_int, _frontend: *mut c_void, _backend: *mut c_void) -> c_int {
-    unsupported_int("zmq_device")
+pub extern "C" fn zmq_device(_type: c_int, frontend: *mut c_void, backend: *mut c_void) -> c_int {
+    zmq_proxy(frontend, backend, ptr::null_mut())
 }
 
 #[no_mangle]
@@ -1243,27 +1331,107 @@ pub extern "C" fn zmq_recvmsg(socket: *mut c_void, msg: *mut zmq_msg_t, flags: c
 #[no_mangle]
 pub extern "C" fn zmq_sendiov(
     socket: *mut c_void,
-    _iov: *mut Iovec,
-    _count: usize,
-    _flags: c_int,
+    iov: *mut Iovec,
+    count: usize,
+    flags: c_int,
 ) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    if iov.is_null() || count == 0 {
+        return set_error(Error::InvalidArgument);
     }
-    unsupported_int("zmq_sendiov")
+    // SAFETY: Caller provides `count` valid iovec entries by C ABI contract.
+    let entries = unsafe { std::slice::from_raw_parts(iov, count) };
+    let mut rc = 0;
+    for (index, entry) in entries.iter().enumerate() {
+        if entry.iov_base.is_null() && entry.iov_len != 0 {
+            return set_error(Error::InvalidArgument);
+        }
+        let data = if entry.iov_len == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: Non-null `iov_base` points to `iov_len` bytes by C ABI contract.
+            unsafe { std::slice::from_raw_parts(entry.iov_base.cast::<u8>(), entry.iov_len) }
+                .to_vec()
+        };
+        let send_flags = if index == count - 1 {
+            flags & !ZMQ_SNDMORE
+        } else {
+            flags
+        };
+        match socket.inner.send(Message::from_vec(data), send_flags) {
+            Ok(size) => rc = size as c_int,
+            Err(error) => return set_error(error),
+        }
+    }
+    clear_errno();
+    rc
 }
 
 #[no_mangle]
 pub extern "C" fn zmq_recviov(
     socket: *mut c_void,
-    _iov: *mut Iovec,
-    _count: *mut usize,
-    _flags: c_int,
+    iov: *mut Iovec,
+    count: *mut usize,
+    flags: c_int,
 ) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    if count.is_null() || iov.is_null() {
+        return set_error(Error::InvalidArgument);
     }
-    unsupported_int("zmq_recviov")
+    // SAFETY: `count` is non-null and writable by C ABI contract.
+    let capacity = unsafe { *count };
+    if capacity == 0 {
+        return set_error(Error::InvalidArgument);
+    }
+    // SAFETY: Caller provides `capacity` writable iovec entries by C ABI contract.
+    let entries = unsafe { std::slice::from_raw_parts_mut(iov, capacity) };
+    // SAFETY: `count` is non-null and writable by C ABI contract.
+    unsafe {
+        *count = 0;
+    }
+    let mut read = 0;
+    for entry in entries.iter_mut() {
+        match socket.inner.recv(flags) {
+            Ok(message) => {
+                let allocation_len = message.len().max(1);
+                // SAFETY: `malloc` returns memory that C callers may release with `free`.
+                let allocation = unsafe { libc::malloc(allocation_len) };
+                if allocation.is_null() {
+                    return set_error(Error::OutOfMemory);
+                }
+                if !message.is_empty() {
+                    // SAFETY: Allocation is writable for at least message length bytes.
+                    unsafe {
+                        ptr::copy_nonoverlapping(
+                            message.data().as_ptr(),
+                            allocation.cast::<u8>(),
+                            message.len(),
+                        );
+                    }
+                }
+                entry.iov_base = allocation;
+                entry.iov_len = message.len();
+                read += 1;
+                // SAFETY: `count` is non-null and writable by C ABI contract.
+                unsafe {
+                    *count = read;
+                }
+                if !message.more() {
+                    clear_errno();
+                    return read as c_int;
+                }
+            }
+            Err(error) => return set_error(error),
+        }
+    }
+    clear_errno();
+    read as c_int
 }
 
 #[no_mangle]
@@ -1816,11 +1984,18 @@ pub extern "C" fn zmq_connect_peer(socket: *mut c_void, endpoint: *const c_char)
 }
 
 #[no_mangle]
-pub extern "C" fn zmq_disconnect_peer(socket: *mut c_void, _routing_id: u32) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
+pub extern "C" fn zmq_disconnect_peer(socket: *mut c_void, routing_id: u32) -> c_int {
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    match socket.inner.disconnect_peer(routing_id) {
+        Ok(()) => {
+            clear_errno();
+            0
+        }
+        Err(error) => set_error(error),
     }
-    unsupported_int("zmq_disconnect_peer")
 }
 
 #[no_mangle]

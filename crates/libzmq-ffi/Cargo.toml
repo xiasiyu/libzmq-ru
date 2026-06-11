@@ -9,6 +9,7 @@ name = "zmq"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
+libc = "0.2"
 libzmq-core.workspace = true
 
 [features]

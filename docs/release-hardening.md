@@ -66,7 +66,7 @@ Fuzz smoke testing is not available yet; `fuzz/` currently contains only the tar
 ## Current Blockers
 
 - Real GSSAPI interop requires a configured Kerberos realm, principal/keytab, or credential cache.
-- `norm://` socket transport still needs the original libzmq stream/event-loop semantics. Only sys-level NORM data object send/receive is proven.
+- `norm://` socket transport still needs the original libzmq stream/event-loop semantics. Sys-level NORM data-object send/receive and a feature-gated PUB/SUB single-frame data-object path are proven.
 - PGM/EPGM requires OpenPGM, which is unavailable in this environment.
 - TIPC/VMCI/VSOCK require platform/kernel support that is unavailable on the current macOS host.
 - Windows DLL export validation requires a Windows-capable runner.

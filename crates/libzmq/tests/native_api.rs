@@ -1,13 +1,17 @@
 use libzmq::{
-    curve_keypair, version, Context, Error, Message, SocketType, ZMQ_CONFLATE, ZMQ_CURVE,
-    ZMQ_CURVE_PUBLICKEY, ZMQ_CURVE_SECRETKEY, ZMQ_CURVE_SERVER, ZMQ_CURVE_SERVERKEY, ZMQ_GSSAPI,
-    ZMQ_GSSAPI_PRINCIPAL, ZMQ_GSSAPI_SERVER, ZMQ_GSSAPI_SERVICE_PRINCIPAL, ZMQ_IO_THREADS,
-    ZMQ_LINGER, ZMQ_MAX_SOCKETS, ZMQ_MECHANISM, ZMQ_NORM_BLOCK_SIZE, ZMQ_NORM_BUFFER_SIZE,
-    ZMQ_NORM_CC, ZMQ_NORM_CCE, ZMQ_NORM_MODE, ZMQ_NORM_NUM_AUTOPARITY, ZMQ_NORM_NUM_PARITY,
-    ZMQ_NORM_PUSH, ZMQ_NORM_SEGMENT_SIZE, ZMQ_NORM_UNICAST_NACK, ZMQ_NULL, ZMQ_PLAIN,
-    ZMQ_PLAIN_PASSWORD, ZMQ_PLAIN_SERVER, ZMQ_PLAIN_USERNAME, ZMQ_RCVHWM, ZMQ_RCVMORE,
-    ZMQ_REQ_RELAXED, ZMQ_ROUTER_HANDOVER, ZMQ_ROUTER_MANDATORY, ZMQ_SNDHWM, ZMQ_SNDMORE, ZMQ_TYPE,
-    ZMQ_XPUB_MANUAL, ZMQ_XPUB_NODROP, ZMQ_XPUB_VERBOSE, ZMQ_XPUB_WELCOME_MSG, ZMQ_ZAP_DOMAIN,
+    curve_keypair, version, Context, Error, Message, SocketType, ZMQ_BUSY_POLL, ZMQ_CONFLATE,
+    ZMQ_CURVE, ZMQ_CURVE_PUBLICKEY, ZMQ_CURVE_SECRETKEY, ZMQ_CURVE_SERVER, ZMQ_CURVE_SERVERKEY,
+    ZMQ_DISCONNECT_MSG, ZMQ_GSSAPI, ZMQ_GSSAPI_PRINCIPAL, ZMQ_GSSAPI_SERVER,
+    ZMQ_GSSAPI_SERVICE_PRINCIPAL, ZMQ_HELLO_MSG, ZMQ_HICCUP_MSG, ZMQ_IN_BATCH_SIZE, ZMQ_IO_THREADS,
+    ZMQ_LINGER, ZMQ_LOOPBACK_FASTPATH, ZMQ_MAX_SOCKETS, ZMQ_MECHANISM, ZMQ_MULTICAST_LOOP,
+    ZMQ_NORM_BLOCK_SIZE, ZMQ_NORM_BUFFER_SIZE, ZMQ_NORM_CC, ZMQ_NORM_CCE, ZMQ_NORM_MODE,
+    ZMQ_NORM_NUM_AUTOPARITY, ZMQ_NORM_NUM_PARITY, ZMQ_NORM_PUSH, ZMQ_NORM_SEGMENT_SIZE,
+    ZMQ_NORM_UNICAST_NACK, ZMQ_NULL, ZMQ_OUT_BATCH_SIZE, ZMQ_PLAIN, ZMQ_PLAIN_PASSWORD,
+    ZMQ_PLAIN_SERVER, ZMQ_PLAIN_USERNAME, ZMQ_PRIORITY, ZMQ_PROBE_ROUTER, ZMQ_RCVHWM, ZMQ_RCVMORE,
+    ZMQ_RECONNECT_STOP, ZMQ_REQ_RELAXED, ZMQ_ROUTER_HANDOVER, ZMQ_ROUTER_MANDATORY, ZMQ_SNDHWM,
+    ZMQ_SNDMORE, ZMQ_TOPICS_COUNT, ZMQ_TYPE, ZMQ_XPUB_MANUAL, ZMQ_XPUB_MANUAL_LAST_VALUE,
+    ZMQ_XPUB_NODROP, ZMQ_XPUB_VERBOSE, ZMQ_XPUB_WELCOME_MSG, ZMQ_XSUB_VERBOSE_UNSUBSCRIBE,
+    ZMQ_ZAP_DOMAIN,
 };
 use std::io::{Read, Write};
 use std::net::{TcpListener, UdpSocket};
@@ -1093,6 +1097,35 @@ fn native_dealer_router_inproc_round_trip_sets_routing_id() {
 }
 
 #[test]
+fn native_probe_router_inproc_sends_empty_probe() {
+    let ctx = Context::new().unwrap();
+    let router = ctx.socket(SocketType::Router).unwrap();
+    let dealer = ctx.socket(SocketType::Dealer).unwrap();
+    let pair = ctx.socket(SocketType::Pair).unwrap();
+
+    assert_eq!(dealer.set_option_i32(ZMQ_PROBE_ROUTER, 1), Ok(()));
+    assert_eq!(
+        pair.set_option_i32(ZMQ_PROBE_ROUTER, 1),
+        Err(Error::InvalidArgument)
+    );
+    assert_eq!(
+        dealer.set_option_i32(ZMQ_PROBE_ROUTER, -1),
+        Err(Error::InvalidArgument)
+    );
+    assert_eq!(
+        dealer.get_option_i32(ZMQ_PROBE_ROUTER),
+        Err(Error::InvalidArgument)
+    );
+
+    router.bind("inproc://native_probe_router").unwrap();
+    dealer.connect("inproc://native_probe_router").unwrap();
+
+    let received = router.recv().unwrap();
+    assert_eq!(received.data(), b"");
+    assert_ne!(received.routing_id(), 0);
+}
+
+#[test]
 fn native_router_inproc_routes_by_routing_id() {
     let ctx = Context::new().unwrap();
     let router = ctx.socket(SocketType::Router).unwrap();
@@ -1279,6 +1312,28 @@ fn native_pub_sub_inproc_filters_by_subscription() {
     assert_eq!(received.data(), b"topic:keep");
 }
 
+#[cfg(feature = "norm")]
+#[test]
+fn native_pub_sub_norm_round_trip() {
+    let port = unused_tcp_port();
+    let endpoint = format!("norm://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let publisher = ctx.socket(SocketType::Pub).unwrap();
+    let subscriber = ctx.socket(SocketType::Sub).unwrap();
+
+    publisher.bind(&endpoint).unwrap();
+    subscriber.connect(&endpoint).unwrap();
+    subscriber.subscribe(b"").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    assert_eq!(publisher.send("norm-test").unwrap(), 9);
+    let received = recv_retry_native(&subscriber).unwrap();
+    assert_eq!(received.data(), b"norm-test");
+
+    assert_eq!(publisher.unbind(&endpoint), Ok(()));
+    assert_eq!(subscriber.disconnect(&endpoint), Ok(()));
+}
+
 #[test]
 fn native_radio_dish_inproc_filters_by_group() {
     let ctx = Context::new().unwrap();
@@ -1413,12 +1468,52 @@ fn native_socket_options_round_trip() {
     assert_eq!(socket.get_option_i32(ZMQ_LINGER).unwrap(), -1);
     assert_eq!(socket.get_option_i32(ZMQ_SNDHWM).unwrap(), 1000);
     assert_eq!(socket.get_option_i32(ZMQ_RCVHWM).unwrap(), 1000);
+    assert_eq!(socket.get_option_i32(ZMQ_RECONNECT_STOP).unwrap(), 0);
+    assert_eq!(socket.get_option_i32(ZMQ_PRIORITY).unwrap(), 0);
+    assert_eq!(socket.get_option_i32(ZMQ_IN_BATCH_SIZE).unwrap(), 8192);
+    assert_eq!(socket.get_option_i32(ZMQ_OUT_BATCH_SIZE).unwrap(), 8192);
+    assert_eq!(socket.get_option_i32(ZMQ_LOOPBACK_FASTPATH).unwrap(), 0);
+    assert_eq!(socket.get_option_i32(ZMQ_MULTICAST_LOOP).unwrap(), 1);
     socket.set_option_i32(ZMQ_LINGER, 0).unwrap();
     socket.set_option_i32(ZMQ_SNDHWM, 10).unwrap();
     socket.set_option_i32(ZMQ_RCVHWM, 11).unwrap();
+    socket.set_option_i32(ZMQ_RECONNECT_STOP, 7).unwrap();
+    socket.set_option_i32(ZMQ_PRIORITY, 3).unwrap();
+    socket.set_option_i32(ZMQ_IN_BATCH_SIZE, 4096).unwrap();
+    socket.set_option_i32(ZMQ_OUT_BATCH_SIZE, 2048).unwrap();
+    socket.set_option_i32(ZMQ_LOOPBACK_FASTPATH, 2).unwrap();
+    socket.set_option_i32(ZMQ_MULTICAST_LOOP, 0).unwrap();
     assert_eq!(socket.get_option_i32(ZMQ_LINGER).unwrap(), 0);
     assert_eq!(socket.get_option_i32(ZMQ_SNDHWM).unwrap(), 10);
     assert_eq!(socket.get_option_i32(ZMQ_RCVHWM).unwrap(), 11);
+    assert_eq!(socket.get_option_i32(ZMQ_RECONNECT_STOP).unwrap(), 7);
+    assert_eq!(socket.get_option_i32(ZMQ_PRIORITY).unwrap(), 3);
+    assert_eq!(socket.get_option_i32(ZMQ_IN_BATCH_SIZE).unwrap(), 4096);
+    assert_eq!(socket.get_option_i32(ZMQ_OUT_BATCH_SIZE).unwrap(), 2048);
+    assert_eq!(socket.get_option_i32(ZMQ_LOOPBACK_FASTPATH).unwrap(), 1);
+    assert_eq!(socket.get_option_i32(ZMQ_MULTICAST_LOOP).unwrap(), 0);
+    assert_eq!(socket.set_option_i32(ZMQ_BUSY_POLL, -5), Ok(()));
+    assert_eq!(
+        socket.get_option_i32(ZMQ_BUSY_POLL),
+        Err(Error::InvalidArgument)
+    );
+    assert_eq!(
+        socket.set_option_i32(ZMQ_PRIORITY, -1),
+        Err(Error::InvalidArgument)
+    );
+    assert_eq!(
+        socket.set_option_i32(ZMQ_IN_BATCH_SIZE, 0),
+        Err(Error::InvalidArgument)
+    );
+    assert_eq!(
+        socket.set_option_i32(ZMQ_OUT_BATCH_SIZE, 0),
+        Err(Error::InvalidArgument)
+    );
+    for option in [ZMQ_HELLO_MSG, ZMQ_DISCONNECT_MSG, ZMQ_HICCUP_MSG] {
+        socket.set_option_bytes(option, b"draft-message").unwrap();
+        socket.set_option_bytes(option, b"").unwrap();
+        assert_eq!(socket.get_option_bytes(option), Err(Error::InvalidArgument));
+    }
 
     let router = ctx.socket(SocketType::Router).unwrap();
     router.set_option_i32(ZMQ_ROUTER_MANDATORY, 1).unwrap();
@@ -1430,9 +1525,32 @@ fn native_socket_options_round_trip() {
     xpub.set_option_i32(ZMQ_XPUB_VERBOSE, 1).unwrap();
     xpub.set_option_i32(ZMQ_XPUB_MANUAL, 1).unwrap();
     xpub.set_option_i32(ZMQ_XPUB_NODROP, 1).unwrap();
+    xpub.set_option_i32(ZMQ_XPUB_MANUAL_LAST_VALUE, 1).unwrap();
     assert_eq!(xpub.get_option_i32(ZMQ_XPUB_VERBOSE).unwrap(), 1);
     assert_eq!(xpub.get_option_i32(ZMQ_XPUB_MANUAL).unwrap(), 1);
     assert_eq!(xpub.get_option_i32(ZMQ_XPUB_NODROP).unwrap(), 1);
+    assert_eq!(
+        xpub.get_option_i32(ZMQ_XPUB_MANUAL_LAST_VALUE),
+        Err(Error::InvalidArgument)
+    );
+    assert_eq!(xpub.get_option_i32(ZMQ_TOPICS_COUNT).unwrap(), 0);
+
+    let xsub = ctx.socket(SocketType::Xsub).unwrap();
+    assert_eq!(xsub.get_option_i32(ZMQ_TOPICS_COUNT).unwrap(), 0);
+    xsub.set_option_i32(ZMQ_XSUB_VERBOSE_UNSUBSCRIBE, 1)
+        .unwrap();
+    xsub.set_option_i32(ZMQ_XSUB_VERBOSE_UNSUBSCRIBE, -1)
+        .unwrap();
+    assert_eq!(
+        xsub.set_option_i32(ZMQ_XPUB_MANUAL_LAST_VALUE, 1),
+        Err(Error::InvalidArgument)
+    );
+    xsub.subscribe(b"a").unwrap();
+    xsub.subscribe(b"b").unwrap();
+    xsub.subscribe(b"a").unwrap();
+    assert_eq!(xsub.get_option_i32(ZMQ_TOPICS_COUNT).unwrap(), 2);
+    xsub.unsubscribe(b"a").unwrap();
+    assert_eq!(xsub.get_option_i32(ZMQ_TOPICS_COUNT).unwrap(), 1);
 
     assert_eq!(socket.get_option_i32(ZMQ_NORM_MODE).unwrap(), ZMQ_NORM_CC);
     assert_eq!(socket.get_option_i32(ZMQ_NORM_BUFFER_SIZE).unwrap(), 2048);
