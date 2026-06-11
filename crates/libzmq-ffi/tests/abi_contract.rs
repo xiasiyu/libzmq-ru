@@ -5,8 +5,9 @@
 
 use std::ffi::{c_char, c_int, c_void};
 use std::ffi::{CStr, CString};
+use std::io::{Read, Write};
 use std::mem::{align_of, size_of, MaybeUninit};
-use std::net::{TcpListener, UdpSocket};
+use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -691,6 +692,56 @@ fn tcp_hiccup_msg_delivers_after_peer_disconnect_over_c_abi() {
     assert_eq!(&buffer[..6], b"hiccup");
 
     assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn stream_tcp_notify_and_raw_data_use_routing_id_frames_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let stream = zmq_socket(ctx, ZMQ_STREAM);
+    assert!(!stream.is_null());
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(stream, endpoint.as_ptr()), 0);
+    let port = endpoint
+        .to_str()
+        .unwrap()
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .to_string();
+    let peer = std::thread::spawn(move || {
+        let mut socket = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+        socket.write_all(b"raw").unwrap();
+        let mut buffer = [0u8; 3];
+        socket.read_exact(&mut buffer).unwrap();
+        assert_eq!(&buffer, b"ack");
+    });
+
+    let mut id = [0u8; 16];
+    let mut buffer = [0u8; 16];
+    let id_size = recv_retry(stream, &mut id);
+    assert!(id_size > 0);
+    assert_eq!(zmq_getsockopt_i32(stream, ZMQ_RCVMORE), 1);
+    assert_eq!(recv_retry(stream, &mut buffer), 0);
+    assert_eq!(zmq_getsockopt_i32(stream, ZMQ_RCVMORE), 0);
+
+    assert_eq!(recv_retry(stream, &mut id), id_size);
+    assert_eq!(zmq_getsockopt_i32(stream, ZMQ_RCVMORE), 1);
+    assert_eq!(recv_retry(stream, &mut buffer), 3);
+    assert_eq!(&buffer[..3], b"raw");
+    assert_eq!(zmq_getsockopt_i32(stream, ZMQ_RCVMORE), 0);
+
+    assert_eq!(
+        zmq_send(stream, id.as_ptr().cast(), id_size as usize, ZMQ_SNDMORE),
+        id_size
+    );
+    assert_eq!(zmq_send(stream, b"ack".as_ptr().cast(), 3, 0), 3);
+    peer.join().unwrap();
+
+    assert_eq!(zmq_close(stream), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
 
@@ -1958,6 +2009,16 @@ fn recv_retry(socket: *mut c_void, buffer: &mut [u8]) -> c_int {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     rc
+}
+
+fn zmq_getsockopt_i32(socket: *mut c_void, option: c_int) -> c_int {
+    let mut value = 0;
+    let mut size = size_of::<c_int>();
+    assert_eq!(
+        zmq_getsockopt(socket, option, (&mut value as *mut c_int).cast(), &mut size),
+        0
+    );
+    value
 }
 
 fn recv_retry_errno(socket: *mut c_void) -> c_int {

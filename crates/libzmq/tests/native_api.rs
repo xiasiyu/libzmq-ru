@@ -834,22 +834,34 @@ fn native_req_rep_tcp_round_trip() {
 
 #[test]
 fn native_stream_tcp_uses_raw_bytes() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("tcp://{}", listener.local_addr().unwrap());
-    let peer = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut buffer = [0u8; 3];
-        stream.read_exact(&mut buffer).unwrap();
-        assert_eq!(&buffer, b"raw");
-        stream.write_all(b"ack").unwrap();
-    });
-
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
     let ctx = Context::new().unwrap();
     let stream = ctx.socket(SocketType::Stream).unwrap();
-    stream.connect(&endpoint).unwrap();
-    assert_eq!(stream.send("raw").unwrap(), 3);
-    let received = stream.recv().unwrap();
-    assert_eq!(received.data(), b"ack");
+
+    stream.bind(&endpoint).unwrap();
+    let peer = std::thread::spawn(move || {
+        let mut socket = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+        socket.write_all(b"raw").unwrap();
+        let mut buffer = [0u8; 3];
+        socket.read_exact(&mut buffer).unwrap();
+        assert_eq!(&buffer, b"ack");
+    });
+
+    let received = recv_retry_native(&stream).unwrap();
+    assert!(received.more());
+    let routing_id = received.data().to_vec();
+    let received = recv_retry_native(&stream).unwrap();
+    assert!(received.data().is_empty());
+
+    let received = recv_retry_native(&stream).unwrap();
+    assert!(received.more());
+    assert_eq!(received.data(), routing_id.as_slice());
+    let received = recv_retry_native(&stream).unwrap();
+    assert_eq!(received.data(), b"raw");
+
+    assert_eq!(stream.send_with_flags(routing_id, ZMQ_SNDMORE).unwrap(), 1);
+    assert_eq!(stream.send("ack").unwrap(), 3);
     peer.join().unwrap();
 }
 

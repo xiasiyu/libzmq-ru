@@ -146,6 +146,9 @@ struct TcpState {
     bound_endpoint: Option<TcpEndpoint>,
     connected_endpoint: Option<TcpEndpoint>,
     next_reconnect_at: Option<Instant>,
+    raw_recv_queue: VecDeque<Message>,
+    raw_send_routing_id: Option<Vec<u8>>,
+    raw_connect_notified: bool,
     handshake_started: bool,
     peer_greeting_done: bool,
     peer_ready: bool,
@@ -1079,31 +1082,37 @@ impl Socket {
         }
         if self.has_udp_transport()? {
             let message = self.recv_udp_datagram()?;
+            self.record_recv_metadata(&message)?;
             self.after_pattern_recv(message.more())?;
             return Ok(message);
         }
         if self.has_norm_transport()? {
             let message = self.recv_norm_data()?;
+            self.record_recv_metadata(&message)?;
             self.after_pattern_recv(message.more())?;
             return Ok(message);
         }
         if self.has_ws_transport()? {
             let message = self.recv_ws_frame()?;
+            self.record_recv_metadata(&message)?;
             self.after_pattern_recv(message.more())?;
             return Ok(message);
         }
         if self.has_wss_transport()? {
             let message = self.recv_wss_frame()?;
+            self.record_recv_metadata(&message)?;
             self.after_pattern_recv(message.more())?;
             return Ok(message);
         }
         if self.has_tcp_transport()? {
             let message = self.recv_tcp_frame()?;
+            self.record_recv_metadata(&message)?;
             self.after_pattern_recv(message.more())?;
             return Ok(message);
         }
         if self.has_ipc_transport()? {
             let message = self.recv_ipc_frame()?;
+            self.record_recv_metadata(&message)?;
             self.after_pattern_recv(message.more())?;
             return Ok(message);
         }
@@ -2010,6 +2019,9 @@ impl Socket {
         tcp.peer_greeting_done = false;
         tcp.peer_ready = false;
         tcp.peer_identity = None;
+        tcp.raw_recv_queue.clear();
+        tcp.raw_send_routing_id = None;
+        tcp.raw_connect_notified = false;
         tcp.hello_sent = false;
         tcp.probe_router_sent = false;
         tcp.curve_session = None;
@@ -2032,6 +2044,9 @@ impl Socket {
         tcp.peer_greeting_done = false;
         tcp.peer_ready = false;
         tcp.peer_identity = None;
+        tcp.raw_recv_queue.clear();
+        tcp.raw_send_routing_id = None;
+        tcp.raw_connect_notified = false;
         tcp.hello_sent = false;
         tcp.probe_router_sent = false;
         tcp.curve_session = None;
@@ -2065,6 +2080,9 @@ impl Socket {
         tcp.peer_greeting_done = false;
         tcp.peer_ready = false;
         tcp.peer_identity = None;
+        tcp.raw_recv_queue.clear();
+        tcp.raw_send_routing_id = None;
+        tcp.raw_connect_notified = false;
         tcp.hello_sent = false;
         tcp.probe_router_sent = false;
         tcp.curve_session = None;
@@ -2087,6 +2105,9 @@ impl Socket {
         tcp.peer_greeting_done = false;
         tcp.peer_ready = false;
         tcp.peer_identity = None;
+        tcp.raw_recv_queue.clear();
+        tcp.raw_send_routing_id = None;
+        tcp.raw_connect_notified = false;
         tcp.hello_sent = false;
         tcp.probe_router_sent = false;
         tcp.curve_session = None;
@@ -2118,6 +2139,9 @@ impl Socket {
                         tcp.peer_greeting_done = false;
                         tcp.peer_ready = false;
                         tcp.peer_identity = None;
+                        tcp.raw_recv_queue.clear();
+                        tcp.raw_send_routing_id = None;
+                        tcp.raw_connect_notified = false;
                         tcp.hello_sent = false;
                         tcp.probe_router_sent = false;
                         tcp.curve_session = None;
@@ -2135,6 +2159,9 @@ impl Socket {
                     Ok(stream) => {
                         configure_tcp_stream(&stream)?;
                         tcp.stream = Some(stream);
+                        tcp.raw_recv_queue.clear();
+                        tcp.raw_send_routing_id = None;
+                        tcp.raw_connect_notified = false;
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         return Err(Error::Again)
@@ -2150,6 +2177,14 @@ impl Socket {
         let mut tcp = self.tcp.lock().map_err(|_| Error::InvalidSocket)?;
         Self::ensure_tcp_stream(&mut tcp)?;
         if self.socket_type == SocketType::Stream {
+            if message.more() {
+                tcp.raw_send_routing_id = Some(message.data().to_vec());
+                return Ok(());
+            }
+            if tcp.raw_send_routing_id.take().is_some() && message.data().is_empty() {
+                reset_tcp_stream_state(&mut tcp);
+                return Ok(());
+            }
             let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
             return stream.write_all(message.data()).map_err(map_io_error);
         }
@@ -2205,11 +2240,35 @@ impl Socket {
 
     fn recv_tcp_frame(&self) -> Result<Message> {
         let mut tcp = self.tcp.lock().map_err(|_| Error::InvalidSocket)?;
-        Self::ensure_tcp_stream(&mut tcp)?;
         if self.socket_type == SocketType::Stream {
+            if let Some(message) = tcp.raw_recv_queue.pop_front() {
+                return Ok(message);
+            }
+            Self::ensure_tcp_stream(&mut tcp)?;
+            let stream_notify = self
+                .options
+                .lock()
+                .map_err(|_| Error::InvalidSocket)?
+                .stream_notify;
+            if stream_notify && !tcp.raw_connect_notified {
+                tcp.raw_connect_notified = true;
+                enqueue_tcp_stream_message(&mut tcp, Vec::new());
+                return tcp.raw_recv_queue.pop_front().ok_or(Error::Again);
+            }
             let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
-            return Ok(Message::from_vec(read_raw_tcp(stream)?));
+            let data = match read_raw_tcp(stream) {
+                Ok(data) => data,
+                Err(error) if stream_notify => {
+                    enqueue_tcp_stream_message(&mut tcp, Vec::new());
+                    reset_tcp_stream_state_after_pending(&mut tcp);
+                    return tcp.raw_recv_queue.pop_front().ok_or(error);
+                }
+                Err(error) => return Err(error),
+            };
+            enqueue_tcp_stream_message(&mut tcp, data);
+            return tcp.raw_recv_queue.pop_front().ok_or(Error::Again);
         }
+        Self::ensure_tcp_stream(&mut tcp)?;
         if !tcp.handshake_started {
             let as_server = tcp.bound_endpoint.is_some();
             let options = self
@@ -3801,7 +3860,7 @@ fn read_raw_tcp(stream: &mut TcpStreamHandle) -> Result<Vec<u8>> {
     let mut buffer = vec![0u8; 8192];
     let size = stream.read(&mut buffer).map_err(map_io_error)?;
     if size == 0 {
-        return Err(Error::Again);
+        return Err(Error::InvalidSocket);
     }
     buffer.truncate(size);
     Ok(buffer)
@@ -3960,6 +4019,9 @@ fn tcp_disconnect_message_or_error(
 
 fn reset_tcp_stream_state(tcp: &mut TcpState) {
     tcp.stream = None;
+    tcp.raw_recv_queue.clear();
+    tcp.raw_send_routing_id = None;
+    tcp.raw_connect_notified = false;
     tcp.handshake_started = false;
     tcp.peer_greeting_done = false;
     tcp.peer_ready = false;
@@ -3968,6 +4030,31 @@ fn reset_tcp_stream_state(tcp: &mut TcpState) {
     tcp.probe_router_sent = false;
     tcp.curve_session = None;
     tcp.gssapi_session = None;
+}
+
+fn reset_tcp_stream_state_after_pending(tcp: &mut TcpState) {
+    tcp.stream = None;
+    tcp.raw_send_routing_id = None;
+    tcp.raw_connect_notified = false;
+    tcp.handshake_started = false;
+    tcp.peer_greeting_done = false;
+    tcp.peer_ready = false;
+    tcp.peer_identity = None;
+    tcp.hello_sent = false;
+    tcp.probe_router_sent = false;
+    tcp.curve_session = None;
+    tcp.gssapi_session = None;
+}
+
+fn enqueue_tcp_stream_message(tcp: &mut TcpState, data: Vec<u8>) {
+    let mut routing_id = Message::from_vec(tcp_stream_routing_id().to_vec());
+    routing_id.set_more(true);
+    tcp.raw_recv_queue.push_back(routing_id);
+    tcp.raw_recv_queue.push_back(Message::from_vec(data));
+}
+
+fn tcp_stream_routing_id() -> &'static [u8] {
+    b"1"
 }
 
 fn write_tcp_message_frame(tcp: &mut TcpState, data: &[u8]) -> Result<()> {
