@@ -13,7 +13,7 @@ The C ABI target is original `libzmq` 4.3.6. Public headers live in `include/` a
 - `ZMQ_PROBE_ROUTER` emits the empty probe frame over inproc and active TCP/IPC ZMTP handshake paths.
 - `ZMQ_ROUTER_RAW` and `ZMQ_STREAM_NOTIFY` match original C ABI set-option validation; full raw ROUTER/STREAM notification delivery remains outside the current guarantee.
 - `zmq_socket_monitor_pipes_stats` matches original precondition errors and publishes v2 queue-stat monitor events for inproc pipes and established TCP/IPC synchronous streams.
-- `ZMQ_HELLO_MSG` delivers configured lifecycle messages over inproc pipes and active TCP/IPC ZMTP handshake paths. `ZMQ_DISCONNECT_MSG` delivers over inproc pipes.
+- `ZMQ_HELLO_MSG` delivers configured lifecycle messages over inproc pipes and active TCP/IPC ZMTP handshake paths. `ZMQ_DISCONNECT_MSG` delivers receiver-side peer-disconnect messages over inproc pipes.
 - Inproc XPUB/XSUB subscription notifications aggregate topics across XSUB peers, suppress duplicate subscribes by default, use refcounted final-unsubscribe forwarding like original libzmq, emit final unsubscribe notifications on XSUB disconnect, support `ZMQ_XPUB_VERBOSE`/`ZMQ_XPUB_VERBOSER` duplicate subscribe notifications, support `ZMQ_XPUB_VERBOSER` non-final unsubscribe notifications, support `ZMQ_XSUB_VERBOSE_UNSUBSCRIBE` unmatched local unsubscribe notifications, and support `ZMQ_XPUB_MANUAL` last-peer accept/revoke.
 
 ## Known Release Gaps

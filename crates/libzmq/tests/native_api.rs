@@ -1023,6 +1023,24 @@ fn native_pair_inproc_disconnect_removes_peer() {
 }
 
 #[test]
+fn native_server_inproc_disconnect_msg_delivers_on_peer_disconnect() {
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Server).unwrap();
+    let client = ctx.socket(SocketType::Client).unwrap();
+
+    server
+        .set_option_bytes(ZMQ_DISCONNECT_MSG, b"goodbye")
+        .unwrap();
+    server.bind("inproc://native_disconnect_msg").unwrap();
+    client.connect("inproc://native_disconnect_msg").unwrap();
+    client.disconnect("inproc://native_disconnect_msg").unwrap();
+
+    let received = server.recv().unwrap();
+    assert_eq!(received.data(), b"goodbye");
+    assert_ne!(received.routing_id(), 0);
+}
+
+#[test]
 fn native_pair_inproc_preserves_multipart_more_state() {
     let ctx = Context::new().unwrap();
     let server = ctx.socket(SocketType::Pair).unwrap();

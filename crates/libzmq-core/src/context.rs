@@ -23,8 +23,19 @@ pub(crate) struct ContextShared {
 
 pub(crate) type MessageQueue = Arc<Mutex<VecDeque<Message>>>;
 pub(crate) type SubscriptionSet = Arc<Mutex<SubscriptionState>>;
+pub(crate) type LifecycleMessage = Arc<Mutex<Vec<u8>>>;
 pub(crate) type WelcomeMessage = Arc<Mutex<Option<Vec<u8>>>>;
 pub(crate) type XpubSubscriptionPolicy = Arc<Mutex<XpubSubscriptionPolicyState>>;
+
+#[derive(Debug)]
+pub(crate) struct InprocBinder {
+    pub(crate) inbox: MessageQueue,
+    pub(crate) socket_type: SocketType,
+    pub(crate) subscriptions: SubscriptionSet,
+    pub(crate) disconnect_msg: LifecycleMessage,
+    pub(crate) welcome: WelcomeMessage,
+    pub(crate) xpub_policy: XpubSubscriptionPolicy,
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct XpubSubscriptionPolicyState {
@@ -131,6 +142,7 @@ pub(crate) struct InprocEndpoint {
     binder_inbox: MessageQueue,
     binder_type: SocketType,
     binder_subscriptions: SubscriptionSet,
+    binder_disconnect_msg: LifecycleMessage,
     binder_welcome: WelcomeMessage,
     binder_xpub_policy: XpubSubscriptionPolicy,
     xpub_peer_topics: Mutex<HashMap<Vec<u8>, HashSet<usize>>>,
@@ -153,6 +165,7 @@ impl InprocEndpoint {
         binder_inbox: MessageQueue,
         binder_type: SocketType,
         binder_subscriptions: SubscriptionSet,
+        binder_disconnect_msg: LifecycleMessage,
         binder_welcome: WelcomeMessage,
         binder_xpub_policy: XpubSubscriptionPolicy,
     ) -> Self {
@@ -160,6 +173,7 @@ impl InprocEndpoint {
             binder_inbox,
             binder_type,
             binder_subscriptions,
+            binder_disconnect_msg,
             binder_welcome,
             binder_xpub_policy,
             xpub_peer_topics: Mutex::new(HashMap::new()),
@@ -208,7 +222,7 @@ impl InprocEndpoint {
         Ok(())
     }
 
-    pub(crate) fn remove_peer(&self, peer_id: usize) -> Result<bool> {
+    pub(crate) fn remove_peer(&self, peer_id: usize, notify_disconnect: bool) -> Result<bool> {
         let mut peers = self.peers.lock().map_err(|_| Error::InvalidSocket)?;
         let removed_peer = peers.iter().find(|peer| peer.id == peer_id).cloned();
         let previous_len = peers.len();
@@ -218,7 +232,33 @@ impl InprocEndpoint {
         if let Some(peer) = removed_peer.filter(|peer| peer.socket_type == SocketType::Xsub) {
             self.remove_xsub_peer_subscriptions(&peer)?;
         }
+        if removed && notify_disconnect {
+            self.send_disconnect_message(peer_id as u32)?;
+        }
         Ok(removed)
+    }
+
+    fn send_disconnect_message(&self, routing_id: u32) -> Result<()> {
+        let data = self
+            .binder_disconnect_msg
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .clone();
+        if data.is_empty() {
+            return Ok(());
+        }
+        let mut message = Message::from_vec(data);
+        if matches!(
+            self.binder_type,
+            SocketType::Router | SocketType::Rep | SocketType::Server | SocketType::Peer
+        ) {
+            message.set_routing_id(routing_id);
+        }
+        self.binder_inbox
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .push_back(message);
+        Ok(())
     }
 
     fn remove_xsub_peer_subscriptions(&self, peer: &InprocPeer) -> Result<()> {
@@ -861,11 +901,7 @@ impl ContextShared {
     pub(crate) fn bind_inproc(
         &self,
         endpoint: &str,
-        inbox: MessageQueue,
-        socket_type: SocketType,
-        subscriptions: SubscriptionSet,
-        welcome: WelcomeMessage,
-        xpub_policy: XpubSubscriptionPolicy,
+        binder: InprocBinder,
     ) -> Result<Arc<InprocEndpoint>> {
         let mut endpoints = self
             .inproc_endpoints
@@ -875,11 +911,12 @@ impl ContextShared {
             return Err(Error::InvalidArgument);
         }
         let endpoint_state = Arc::new(InprocEndpoint::new(
-            inbox,
-            socket_type,
-            subscriptions,
-            welcome,
-            xpub_policy,
+            binder.inbox,
+            binder.socket_type,
+            binder.subscriptions,
+            binder.disconnect_msg,
+            binder.welcome,
+            binder.xpub_policy,
         ));
         let pending_peers = self
             .pending_inproc
@@ -945,7 +982,7 @@ impl ContextShared {
             .get(endpoint)
             .cloned()
         {
-            removed = endpoint_state.remove_peer(id)?;
+            removed = endpoint_state.remove_peer(id, true)?;
         }
 
         let mut pending = self

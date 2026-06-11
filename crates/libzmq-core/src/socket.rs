@@ -1,7 +1,8 @@
 use crate::constants::*;
 use crate::context::{
-    ContextShared, ContextSocketDefaults, InprocEndpoint, MessageQueue, SubscriptionSet,
-    SubscriptionState, WelcomeMessage, XpubSubscriptionPolicy, XpubSubscriptionPolicyState,
+    ContextShared, ContextSocketDefaults, InprocBinder, InprocEndpoint, LifecycleMessage,
+    MessageQueue, SubscriptionSet, SubscriptionState, WelcomeMessage, XpubSubscriptionPolicy,
+    XpubSubscriptionPolicyState,
 };
 #[cfg(feature = "norm")]
 use crate::transport::NormEndpoint;
@@ -103,6 +104,7 @@ pub struct Socket {
     context: Arc<ContextShared>,
     inbox: MessageQueue,
     subscriptions: SubscriptionSet,
+    inproc_disconnect_msg: LifecycleMessage,
     xpub_welcome: WelcomeMessage,
     xpub_subscription_policy: XpubSubscriptionPolicy,
     inproc: Mutex<InprocState>,
@@ -666,6 +668,7 @@ impl Socket {
             context,
             inbox: Arc::new(Mutex::new(VecDeque::new())),
             subscriptions: Arc::new(Mutex::new(SubscriptionState::default())),
+            inproc_disconnect_msg: Arc::new(Mutex::new(Vec::new())),
             xpub_welcome: Arc::new(Mutex::new(None)),
             xpub_subscription_policy: Arc::new(Mutex::new(XpubSubscriptionPolicyState::default())),
             inproc: Mutex::new(InprocState::default()),
@@ -723,11 +726,14 @@ impl Socket {
             .ok_or(Error::NotSupported)?;
         let bound = self.context.bind_inproc(
             endpoint_name,
-            Arc::clone(&self.inbox),
-            self.socket_type,
-            Arc::clone(&self.subscriptions),
-            Arc::clone(&self.xpub_welcome),
-            Arc::clone(&self.xpub_subscription_policy),
+            InprocBinder {
+                inbox: Arc::clone(&self.inbox),
+                socket_type: self.socket_type,
+                subscriptions: Arc::clone(&self.subscriptions),
+                disconnect_msg: Arc::clone(&self.inproc_disconnect_msg),
+                welcome: Arc::clone(&self.xpub_welcome),
+                xpub_policy: Arc::clone(&self.xpub_subscription_policy),
+            },
         )?;
         {
             let mut inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
@@ -843,7 +849,6 @@ impl Socket {
                 return Err(Error::InvalidArgument);
             }
         }
-        self.send_inproc_disconnect_message()?;
         {
             let mut inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
             self.context.disconnect_inproc(endpoint_name, self.id)?;
@@ -862,7 +867,7 @@ impl Socket {
         let Some(bound_endpoint) = &inproc.bound_endpoint else {
             return Err(Error::HostUnreachable);
         };
-        if bound_endpoint.remove_peer(routing_id as usize)? {
+        if bound_endpoint.remove_peer(routing_id as usize, false)? {
             Ok(())
         } else {
             Err(Error::HostUnreachable)
@@ -914,11 +919,14 @@ impl Socket {
         let monitor_inbox = Arc::new(Mutex::new(VecDeque::new()));
         self.context.bind_inproc(
             endpoint_name,
-            monitor_inbox,
-            monitor_socket_type,
-            Arc::new(Mutex::new(SubscriptionState::default())),
-            Arc::new(Mutex::new(None)),
-            Arc::new(Mutex::new(XpubSubscriptionPolicyState::default())),
+            InprocBinder {
+                inbox: monitor_inbox,
+                socket_type: monitor_socket_type,
+                subscriptions: Arc::new(Mutex::new(SubscriptionState::default())),
+                disconnect_msg: Arc::new(Mutex::new(Vec::new())),
+                welcome: Arc::new(Mutex::new(None)),
+                xpub_policy: Arc::new(Mutex::new(XpubSubscriptionPolicyState::default())),
+            },
         )?;
         *self.monitor.lock().map_err(|_| Error::InvalidSocket)? = Some(MonitorState {
             endpoint_name: endpoint_name.to_string(),
@@ -1719,14 +1727,21 @@ impl Socket {
                     .hello_msg,
                 value,
             ),
-            ZMQ_DISCONNECT_MSG => set_bytes(
-                &mut self
-                    .options
+            ZMQ_DISCONNECT_MSG => {
+                set_bytes(
+                    &mut self
+                        .options
+                        .lock()
+                        .map_err(|_| Error::InvalidSocket)?
+                        .disconnect_msg,
+                    value,
+                )?;
+                let mut lifecycle = self
+                    .inproc_disconnect_msg
                     .lock()
-                    .map_err(|_| Error::InvalidSocket)?
-                    .disconnect_msg,
-                value,
-            ),
+                    .map_err(|_| Error::InvalidSocket)?;
+                set_bytes(&mut lifecycle, value)
+            }
             ZMQ_HICCUP_MSG => set_bytes(
                 &mut self
                     .options
@@ -1901,16 +1916,6 @@ impl Socket {
             .hello_msg
             .clone();
         self.send_inproc_lifecycle_message(&hello_msg)
-    }
-
-    fn send_inproc_disconnect_message(&self) -> Result<()> {
-        let disconnect_msg = self
-            .options
-            .lock()
-            .map_err(|_| Error::InvalidSocket)?
-            .disconnect_msg
-            .clone();
-        self.send_inproc_lifecycle_message(&disconnect_msg)
     }
 
     fn send_inproc_lifecycle_message(&self, data: &[u8]) -> Result<()> {

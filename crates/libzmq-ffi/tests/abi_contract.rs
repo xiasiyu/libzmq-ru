@@ -4803,41 +4803,41 @@ fn draft_message_socket_options_set_over_c_abi() {
 }
 
 #[test]
-fn inproc_hello_and_disconnect_messages_deliver_over_c_abi() {
+fn inproc_hello_and_receiver_disconnect_messages_deliver_over_c_abi() {
     let ctx = zmq_ctx_new();
     assert!(!ctx.is_null());
-    let router = zmq_socket(ctx, ZMQ_ROUTER);
-    let dealer = zmq_socket(ctx, ZMQ_DEALER);
-    assert!(!router.is_null());
-    assert!(!dealer.is_null());
+    let server = zmq_socket(ctx, ZMQ_SERVER);
+    let client = zmq_socket(ctx, ZMQ_CLIENT);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
 
     assert_eq!(
-        zmq_setsockopt(dealer, ZMQ_HELLO_MSG, b"hello".as_ptr().cast(), 5),
+        zmq_setsockopt(client, ZMQ_HELLO_MSG, b"hello".as_ptr().cast(), 5),
         0
     );
     assert_eq!(
-        zmq_setsockopt(dealer, ZMQ_DISCONNECT_MSG, b"goodbye".as_ptr().cast(), 7),
+        zmq_setsockopt(server, ZMQ_DISCONNECT_MSG, b"goodbye".as_ptr().cast(), 7),
         0
     );
 
     let endpoint = c"inproc://c_inproc_lifecycle_messages";
-    assert_eq!(zmq_bind(router, endpoint.as_ptr()), 0);
-    assert_eq!(zmq_connect(dealer, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
 
     let mut hello = MaybeUninit::<zmq_msg_t>::uninit();
     assert_eq!(zmq_msg_init(hello.as_mut_ptr()), 0);
     let mut hello = unsafe { hello.assume_init() };
-    assert_eq!(zmq_msg_recv(&mut hello, router, 0), 5);
+    assert_eq!(zmq_msg_recv(&mut hello, server, 0), 5);
     assert_ne!(zmq_msg_routing_id(&mut hello), 0);
     let hello_data =
         unsafe { std::slice::from_raw_parts(zmq_msg_data(&mut hello).cast::<u8>(), 5) };
     assert_eq!(hello_data, b"hello");
 
-    assert_eq!(zmq_disconnect(dealer, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_disconnect(client, endpoint.as_ptr()), 0);
     let mut goodbye = MaybeUninit::<zmq_msg_t>::uninit();
     assert_eq!(zmq_msg_init(goodbye.as_mut_ptr()), 0);
     let mut goodbye = unsafe { goodbye.assume_init() };
-    assert_eq!(zmq_msg_recv(&mut goodbye, router, 0), 7);
+    assert_eq!(zmq_msg_recv(&mut goodbye, server, 0), 7);
     assert_ne!(zmq_msg_routing_id(&mut goodbye), 0);
     let goodbye_data =
         unsafe { std::slice::from_raw_parts(zmq_msg_data(&mut goodbye).cast::<u8>(), 7) };
@@ -4845,8 +4845,8 @@ fn inproc_hello_and_disconnect_messages_deliver_over_c_abi() {
 
     assert_eq!(zmq_msg_close(&mut goodbye), 0);
     assert_eq!(zmq_msg_close(&mut hello), 0);
-    assert_eq!(zmq_close(dealer), 0);
-    assert_eq!(zmq_close(router), 0);
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
 
