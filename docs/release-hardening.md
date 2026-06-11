@@ -70,7 +70,7 @@ Fuzz smoke testing is not available yet; `fuzz/` currently contains only the tar
 - Full `ROUTER` blob routing-id parity is still incomplete. The C ABI now covers inproc `zmq_socket_get_peer_state` for the current numeric peer-id model and the received message's decimal `Routing-Id` blob property, but TCP/IPC arbitrary blob identity framing remains release-blocking for full compatibility.
 - `zmq_socket_monitor_pipes_stats` covers inproc and established TCP/IPC synchronous stream v2 events, but full original I/O-thread queue-depth parity remains incomplete.
 - Hello/disconnect lifecycle messages now deliver over inproc pipes, but TCP/IPC session delivery and hiccup semantics remain incomplete.
-- XPUB/XSUB default and `ZMQ_XPUB_VERBOSE` inproc subscription notifications are covered, but manual-last, verboser unsubscribe, and only-first-subscribe multipart forwarding semantics remain incomplete.
+- XPUB/XSUB default refcounted local and multi-peer notifications, `ZMQ_XPUB_VERBOSE`/`ZMQ_XPUB_VERBOSER`, and `ZMQ_XSUB_VERBOSE_UNSUBSCRIBE` inproc subscription notifications are covered, but manual-last and only-first-subscribe multipart forwarding semantics remain incomplete.
 - PGM/EPGM requires OpenPGM, which is unavailable in this environment.
 - TIPC/VMCI/VSOCK require platform/kernel support that is unavailable on the current macOS host.
 - Windows DLL export validation requires a Windows-capable runner.

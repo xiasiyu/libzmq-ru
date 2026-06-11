@@ -36,7 +36,7 @@ pub(crate) struct XpubSubscriptionPolicyState {
 #[derive(Debug)]
 pub(crate) struct SubscriptionState {
     prefixes: Vec<Vec<u8>>,
-    exact: HashSet<Vec<u8>>,
+    exact: HashMap<Vec<u8>, usize>,
     first_bytes: [bool; 256],
     lengths: Vec<usize>,
     has_empty: bool,
@@ -46,7 +46,7 @@ impl Default for SubscriptionState {
     fn default() -> Self {
         Self {
             prefixes: Vec::new(),
-            exact: HashSet::new(),
+            exact: HashMap::new(),
             first_bytes: [false; 256],
             lengths: Vec::new(),
             has_empty: false,
@@ -56,9 +56,11 @@ impl Default for SubscriptionState {
 
 impl SubscriptionState {
     pub(crate) fn insert(&mut self, prefix: &[u8]) -> bool {
-        if !self.exact.insert(prefix.to_vec()) {
+        if let Some(count) = self.exact.get_mut(prefix) {
+            *count += 1;
             return false;
         }
+        self.exact.insert(prefix.to_vec(), 1);
         self.has_empty |= prefix.is_empty();
         if let Some(first) = prefix.first() {
             self.first_bytes[*first as usize] = true;
@@ -71,11 +73,17 @@ impl SubscriptionState {
     }
 
     pub(crate) fn remove(&mut self, prefix: &[u8]) -> bool {
-        if !self.exact.remove(prefix) {
-            return false;
+        match self.exact.get_mut(prefix) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                return false;
+            }
+            Some(_) => {}
+            None => return false,
         }
+        self.exact.remove(prefix);
         self.prefixes.retain(|stored| stored.as_slice() != prefix);
-        self.has_empty = self.exact.contains(&[][..]);
+        self.has_empty = self.exact.contains_key(&[][..]);
         self.first_bytes = [false; 256];
         self.lengths.clear();
         for stored in &self.prefixes {
@@ -105,7 +113,7 @@ impl SubscriptionState {
         }
         self.lengths
             .iter()
-            .any(|len| *len <= data.len() && self.exact.contains(&data[..*len]))
+            .any(|len| *len <= data.len() && self.exact.contains_key(&data[..*len]))
     }
 
     pub(crate) fn count(&self) -> usize {
@@ -113,7 +121,7 @@ impl SubscriptionState {
     }
 
     fn contains_exact(&self, value: &[u8]) -> bool {
-        self.exact.contains(value)
+        self.exact.contains_key(value)
     }
 }
 
@@ -124,6 +132,7 @@ pub(crate) struct InprocEndpoint {
     binder_subscriptions: SubscriptionSet,
     binder_welcome: WelcomeMessage,
     binder_xpub_policy: XpubSubscriptionPolicy,
+    xpub_peer_topics: Mutex<HashMap<Vec<u8>, HashSet<usize>>>,
     peers: Mutex<Vec<InprocPeer>>,
     next_peer: AtomicUsize,
 }
@@ -150,6 +159,7 @@ impl InprocEndpoint {
             binder_subscriptions,
             binder_welcome,
             binder_xpub_policy,
+            xpub_peer_topics: Mutex::new(HashMap::new()),
             peers: Mutex::new(Vec::new()),
             next_peer: AtomicUsize::new(0),
         }
@@ -275,40 +285,92 @@ impl InprocEndpoint {
         Ok(sent)
     }
 
-    pub(crate) fn replay_subscription(&self, prefix: &[u8]) -> Result<()> {
+    pub(crate) fn replay_subscription(&self, peer_id: usize, prefix: &[u8]) -> Result<()> {
+        if !self.should_replay_subscription(peer_id, prefix, false)? {
+            return Ok(());
+        }
         self.replay_subscription_change(true, prefix)
     }
 
-    pub(crate) fn replay_duplicate_subscription(&self, prefix: &[u8]) -> Result<()> {
-        if self.binder_type != SocketType::Xpub {
+    pub(crate) fn replay_duplicate_subscription(
+        &self,
+        peer_id: usize,
+        prefix: &[u8],
+    ) -> Result<()> {
+        if !self.should_replay_subscription(peer_id, prefix, true)? {
             return Ok(());
+        }
+        self.replay_subscription_change(true, prefix)
+    }
+
+    fn should_replay_subscription(
+        &self,
+        peer_id: usize,
+        prefix: &[u8],
+        duplicate_from_peer: bool,
+    ) -> Result<bool> {
+        if self.binder_type != SocketType::Xpub {
+            return Ok(false);
         }
         let policy = *self
             .binder_xpub_policy
             .lock()
             .map_err(|_| Error::InvalidSocket)?;
-        if policy.verbose_subscribe || policy.manual {
-            self.replay_subscription_change(true, prefix)?;
+        if duplicate_from_peer {
+            return Ok(policy.verbose_subscribe || policy.manual);
         }
-        Ok(())
+
+        let mut topics = self
+            .xpub_peer_topics
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?;
+        let peers = topics.entry(prefix.to_vec()).or_default();
+        peers.insert(peer_id);
+        Ok(peers.len() == 1 || policy.verbose_subscribe || policy.manual)
     }
 
-    pub(crate) fn replay_unsubscription(&self, prefix: &[u8]) -> Result<()> {
+    pub(crate) fn replay_unsubscription(
+        &self,
+        peer_id: usize,
+        prefix: &[u8],
+        unmatched_from_peer: bool,
+    ) -> Result<()> {
+        if !self.should_replay_unsubscription(peer_id, prefix, unmatched_from_peer)? {
+            return Ok(());
+        }
         self.replay_subscription_change(false, prefix)
     }
 
-    pub(crate) fn replay_duplicate_unsubscription(&self, prefix: &[u8]) -> Result<()> {
+    fn should_replay_unsubscription(
+        &self,
+        peer_id: usize,
+        prefix: &[u8],
+        unmatched_from_peer: bool,
+    ) -> Result<bool> {
         if self.binder_type != SocketType::Xpub {
-            return Ok(());
+            return Ok(false);
         }
         let policy = *self
             .binder_xpub_policy
             .lock()
             .map_err(|_| Error::InvalidSocket)?;
-        if policy.verbose_unsubscribe || policy.manual {
-            self.replay_subscription_change(false, prefix)?;
+        if unmatched_from_peer {
+            return Ok(true);
         }
-        Ok(())
+
+        let mut topics = self
+            .xpub_peer_topics
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?;
+        let Some(peers) = topics.get_mut(prefix) else {
+            return Ok(true);
+        };
+        peers.remove(&peer_id);
+        if peers.is_empty() {
+            topics.remove(prefix);
+            return Ok(true);
+        }
+        Ok(policy.verbose_unsubscribe || policy.manual)
     }
 
     fn replay_subscription_change(&self, subscribe: bool, prefix: &[u8]) -> Result<()> {
@@ -334,7 +396,7 @@ impl InprocEndpoint {
             .lock()
             .map_err(|_| Error::InvalidSocket)?;
         for prefix in subscriptions.iter_prefixes() {
-            self.replay_subscription(prefix)?;
+            self.replay_subscription(peer.id, prefix)?;
         }
         Ok(())
     }

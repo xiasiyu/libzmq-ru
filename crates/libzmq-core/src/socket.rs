@@ -1183,9 +1183,9 @@ impl Socket {
         if let Some(endpoint) = &inproc.connected_endpoint {
             if let Some(bound_endpoint) = self.context.inproc_endpoint(endpoint)? {
                 if inserted {
-                    bound_endpoint.replay_subscription(prefix)?;
+                    bound_endpoint.replay_subscription(self.id, prefix)?;
                 } else {
-                    bound_endpoint.replay_duplicate_subscription(prefix)?;
+                    bound_endpoint.replay_duplicate_subscription(self.id, prefix)?;
                 }
             }
         }
@@ -1205,10 +1205,18 @@ impl Socket {
         let inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
         if let Some(endpoint) = &inproc.connected_endpoint {
             if let Some(bound_endpoint) = self.context.inproc_endpoint(endpoint)? {
-                if removed {
-                    bound_endpoint.replay_unsubscription(prefix)?;
-                } else {
-                    bound_endpoint.replay_duplicate_unsubscription(prefix)?;
+                let verbose_unmatched = self.socket_type == SocketType::Xsub
+                    && self
+                        .options
+                        .lock()
+                        .map_err(|_| Error::InvalidSocket)?
+                        .xsub_verbose_unsubscribe;
+                if removed || verbose_unmatched {
+                    bound_endpoint.replay_unsubscription(
+                        self.id,
+                        prefix,
+                        verbose_unmatched && !removed,
+                    )?;
                 }
             }
         }

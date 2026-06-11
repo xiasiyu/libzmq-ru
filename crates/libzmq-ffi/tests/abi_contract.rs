@@ -115,6 +115,7 @@ const ZMQ_BLOCKY: c_int = 70;
 const ZMQ_HEARTBEAT_IVL: c_int = 75;
 const ZMQ_HEARTBEAT_TTL: c_int = 76;
 const ZMQ_HEARTBEAT_TIMEOUT: c_int = 77;
+const ZMQ_XPUB_VERBOSER: c_int = 78;
 const ZMQ_CONNECT_TIMEOUT: c_int = 79;
 const ZMQ_TCP_MAXRT: c_int = 80;
 const ZMQ_MULTICAST_MAXTPDU: c_int = 84;
@@ -2501,9 +2502,9 @@ fn xpub_welcome_and_xsub_replay_over_c_abi() {
     );
     assert_eq!(
         zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
-        1 + prefix.len() as c_int
+        -1
     );
-    assert_eq!(&buffer[..1 + prefix.len()], b"\0topic");
+    assert_eq!(zmq_errno(), EAGAIN);
     assert_eq!(
         zmq_setsockopt(
             subscriber,
@@ -2515,9 +2516,9 @@ fn xpub_welcome_and_xsub_replay_over_c_abi() {
     );
     assert_eq!(
         zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
-        -1
+        1 + prefix.len() as c_int
     );
-    assert_eq!(zmq_errno(), EAGAIN);
+    assert_eq!(&buffer[..1 + prefix.len()], b"\0topic");
 
     assert_eq!(zmq_close(subscriber), 0);
     assert_eq!(zmq_close(publisher), 0);
@@ -2606,6 +2607,186 @@ fn xpub_verbose_forwards_duplicate_subscriptions_over_c_abi() {
     assert_eq!(zmq_errno(), EAGAIN);
 
     assert_eq!(zmq_close(subscriber), 0);
+    assert_eq!(zmq_close(publisher), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn xsub_verbose_unsubscribe_forwards_unmatched_unsubscribe_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let publisher = zmq_socket(ctx, ZMQ_XPUB);
+    let subscriber = zmq_socket(ctx, ZMQ_XSUB);
+    assert!(!publisher.is_null());
+    assert!(!subscriber.is_null());
+
+    let value = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            publisher,
+            ZMQ_XPUB_VERBOSER,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+
+    let endpoint = c"inproc://c_xsub_verbose_unsubscribe";
+    assert_eq!(zmq_bind(publisher, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(subscriber, endpoint.as_ptr()), 0);
+
+    let topic = b"gone";
+    assert_eq!(
+        zmq_setsockopt(
+            subscriber,
+            ZMQ_UNSUBSCRIBE,
+            topic.as_ptr().cast(),
+            topic.len()
+        ),
+        0
+    );
+    let mut buffer = [0u8; 16];
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        -1
+    );
+    assert_eq!(zmq_errno(), EAGAIN);
+
+    assert_eq!(
+        zmq_setsockopt(
+            subscriber,
+            ZMQ_XSUB_VERBOSE_UNSUBSCRIBE,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(
+            subscriber,
+            ZMQ_UNSUBSCRIBE,
+            topic.as_ptr().cast(),
+            topic.len()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        1 + topic.len() as c_int
+    );
+    assert_eq!(&buffer[..1 + topic.len()], b"\0gone");
+
+    assert_eq!(zmq_close(subscriber), 0);
+    assert_eq!(zmq_close(publisher), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
+fn xpub_aggregates_subscriptions_across_xsub_peers_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let publisher = zmq_socket(ctx, ZMQ_XPUB);
+    let sub0 = zmq_socket(ctx, ZMQ_XSUB);
+    let sub1 = zmq_socket(ctx, ZMQ_XSUB);
+    assert!(!publisher.is_null());
+    assert!(!sub0.is_null());
+    assert!(!sub1.is_null());
+
+    let endpoint = c"inproc://c_xpub_multi_xsub";
+    assert_eq!(zmq_bind(publisher, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(sub0, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(sub1, endpoint.as_ptr()), 0);
+
+    let topic = b"shared";
+    let mut buffer = [0u8; 16];
+    assert_eq!(
+        zmq_setsockopt(sub0, ZMQ_SUBSCRIBE, topic.as_ptr().cast(), topic.len()),
+        0
+    );
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        1 + topic.len() as c_int
+    );
+    assert_eq!(&buffer[..1 + topic.len()], b"\x01shared");
+    assert_eq!(
+        zmq_setsockopt(sub1, ZMQ_SUBSCRIBE, topic.as_ptr().cast(), topic.len()),
+        0
+    );
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        -1
+    );
+    assert_eq!(zmq_errno(), EAGAIN);
+
+    assert_eq!(
+        zmq_setsockopt(sub1, ZMQ_UNSUBSCRIBE, topic.as_ptr().cast(), topic.len()),
+        0
+    );
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        -1
+    );
+    assert_eq!(zmq_errno(), EAGAIN);
+    assert_eq!(
+        zmq_setsockopt(sub0, ZMQ_UNSUBSCRIBE, topic.as_ptr().cast(), topic.len()),
+        0
+    );
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        1 + topic.len() as c_int
+    );
+    assert_eq!(&buffer[..1 + topic.len()], b"\0shared");
+
+    let value = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            publisher,
+            ZMQ_XPUB_VERBOSER,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    assert_eq!(
+        zmq_setsockopt(sub0, ZMQ_SUBSCRIBE, topic.as_ptr().cast(), topic.len()),
+        0
+    );
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        1 + topic.len() as c_int
+    );
+    assert_eq!(&buffer[..1 + topic.len()], b"\x01shared");
+    assert_eq!(
+        zmq_setsockopt(sub1, ZMQ_SUBSCRIBE, topic.as_ptr().cast(), topic.len()),
+        0
+    );
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        1 + topic.len() as c_int
+    );
+    assert_eq!(&buffer[..1 + topic.len()], b"\x01shared");
+
+    assert_eq!(
+        zmq_setsockopt(sub1, ZMQ_UNSUBSCRIBE, topic.as_ptr().cast(), topic.len()),
+        0
+    );
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        1 + topic.len() as c_int
+    );
+    assert_eq!(&buffer[..1 + topic.len()], b"\0shared");
+    assert_eq!(
+        zmq_setsockopt(sub0, ZMQ_UNSUBSCRIBE, topic.as_ptr().cast(), topic.len()),
+        0
+    );
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        1 + topic.len() as c_int
+    );
+    assert_eq!(&buffer[..1 + topic.len()], b"\0shared");
+
+    assert_eq!(zmq_close(sub1), 0);
+    assert_eq!(zmq_close(sub0), 0);
     assert_eq!(zmq_close(publisher), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
 }
@@ -4284,6 +4465,22 @@ fn xpub_xsub_draft_options_over_c_abi() {
     );
     assert_eq!(
         zmq_setsockopt(xsub, ZMQ_SUBSCRIBE, b"a".as_ptr().cast(), 1),
+        0
+    );
+    count = -1;
+    size = size_of::<c_int>();
+    assert_eq!(
+        zmq_getsockopt(
+            xsub,
+            ZMQ_TOPICS_COUNT,
+            (&mut count as *mut c_int).cast(),
+            &mut size
+        ),
+        0
+    );
+    assert_eq!(count, 2);
+    assert_eq!(
+        zmq_setsockopt(xsub, ZMQ_UNSUBSCRIBE, b"a".as_ptr().cast(), 1),
         0
     );
     count = -1;
