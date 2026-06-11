@@ -22,7 +22,9 @@ const STR_INVALID_ARGUMENT: &[u8] = b"Invalid argument\0";
 const STR_BAD_ADDRESS: &[u8] = b"Bad address\0";
 const STR_AGAIN: &[u8] = b"Resource temporarily unavailable\0";
 const STR_NOT_SUPPORTED: &[u8] = b"Operation not supported\0";
+const STR_PROTOCOL_NOT_SUPPORTED: &[u8] = b"Protocol not supported\0";
 const STR_NOT_SOCKET: &[u8] = b"Socket operation on non-socket\0";
+const STR_HOST_UNREACHABLE: &[u8] = b"Host unreachable\0";
 const STR_FSM: &[u8] = b"Operation cannot be accomplished in current state\0";
 const STR_INCOMPAT_PROTO: &[u8] = b"The protocol is not compatible with the socket type\0";
 const STR_TERMINATED: &[u8] = b"Context was terminated\0";
@@ -317,10 +319,6 @@ fn clear_errno() {
     set_errno(0);
 }
 
-fn unsupported_int(name: &'static str) -> c_int {
-    set_error(Error::NotImplemented(name))
-}
-
 fn is_settable_bytes_sockopt(option: c_int) -> bool {
     matches!(
         option,
@@ -401,10 +399,18 @@ fn socket_from_raw(socket: *mut c_void) -> Result<&'static mut OpaqueSocket, Err
 
 fn poller_from_raw(poller: *mut c_void) -> Result<&'static mut OpaquePoller, Error> {
     if poller.is_null() {
-        return Err(Error::InvalidArgument);
+        return Err(Error::InvalidContext);
     }
     // SAFETY: C ABI callers receive poller pointers only from `zmq_poller_new`.
     Ok(unsafe { &mut *(poller.cast::<OpaquePoller>()) })
+}
+
+fn validate_poller_events(events: i16) -> Result<(), Error> {
+    const VALID_EVENTS: i16 = (ZMQ_POLLIN | ZMQ_POLLOUT | ZMQ_POLLERR | ZMQ_POLLPRI) as i16;
+    if events & !VALID_EVENTS != 0 {
+        return Err(Error::InvalidArgument);
+    }
+    Ok(())
 }
 
 fn timers_from_raw(timers: *mut c_void) -> Result<&'static mut OpaqueTimers, Error> {
@@ -458,7 +464,9 @@ pub extern "C" fn zmq_strerror(errnum: c_int) -> *const c_char {
         EFAULT => STR_BAD_ADDRESS.as_ptr().cast(),
         EAGAIN => STR_AGAIN.as_ptr().cast(),
         ENOTSUP => STR_NOT_SUPPORTED.as_ptr().cast(),
+        EPROTONOSUPPORT => STR_PROTOCOL_NOT_SUPPORTED.as_ptr().cast(),
         ENOTSOCK => STR_NOT_SOCKET.as_ptr().cast(),
+        EHOSTUNREACH => STR_HOST_UNREACHABLE.as_ptr().cast(),
         EFSM => STR_FSM.as_ptr().cast(),
         ENOCOMPATPROTO => STR_INCOMPAT_PROTO.as_ptr().cast(),
         ETERM => STR_TERMINATED.as_ptr().cast(),
@@ -847,7 +855,7 @@ pub extern "C" fn zmq_msg_gets(msg: *const zmq_msg_t, _property: *const c_char) 
         clear_errno();
         return value.as_ptr();
     }
-    set_errno(ENOTSUP);
+    set_errno(EINVAL);
     ptr::null()
 }
 
@@ -1145,18 +1153,24 @@ pub extern "C" fn zmq_socket_monitor(
     endpoint: *const c_char,
     events: c_int,
 ) -> c_int {
-    if endpoint.is_null() {
-        return set_error(Error::InvalidArgument);
-    }
     let socket = match socket_from_raw(socket) {
         Ok(socket) => socket,
         Err(error) => return set_error(error),
     };
+    if endpoint.is_null() {
+        return match socket.inner.stop_monitor() {
+            Ok(()) => {
+                clear_errno();
+                0
+            }
+            Err(error) => set_error(error),
+        };
+    }
     let endpoint = match endpoint_from_raw(endpoint) {
         Ok(endpoint) => endpoint,
         Err(error) => return set_error(error),
     };
-    match socket.inner.monitor(endpoint, events as u64) {
+    match socket.inner.monitor(endpoint, events as u64, 1, ZMQ_PAIR) {
         Ok(()) => {
             clear_errno();
             0
@@ -1866,7 +1880,22 @@ pub extern "C" fn zmq_ctx_set_ext(
     optval: *const c_void,
     optvallen: usize,
 ) -> c_int {
-    if optval.is_null() || optvallen != std::mem::size_of::<c_int>() {
+    if optval.is_null() {
+        return set_error(Error::InvalidArgument);
+    }
+    if option == ZMQ_THREAD_NAME_PREFIX && optvallen != std::mem::size_of::<c_int>() {
+        // SAFETY: `optval` was checked non-null and is read-only for `optvallen` bytes.
+        let value = unsafe { std::slice::from_raw_parts(optval.cast::<u8>(), optvallen) };
+        return match context_from_raw(ctx).and_then(|ctx| ctx.inner.set_option_bytes(option, value))
+        {
+            Ok(()) => {
+                clear_errno();
+                0
+            }
+            Err(error) => set_error(error),
+        };
+    }
+    if optvallen != std::mem::size_of::<c_int>() {
         return set_error(Error::InvalidArgument);
     }
     // SAFETY: `optval` was checked non-null and `optvallen` matches `c_int` size.
@@ -1892,6 +1921,27 @@ pub extern "C" fn zmq_ctx_get_ext(
     }
     // SAFETY: `optvallen` is non-null and points to caller-provided storage.
     let available = unsafe { *optvallen };
+    if option == ZMQ_THREAD_NAME_PREFIX && available != std::mem::size_of::<c_int>() {
+        let value = match context_from_raw(ctx).and_then(|ctx| ctx.inner.get_option_bytes(option)) {
+            Ok(value) => value,
+            Err(error) => return set_error(error),
+        };
+        if available < value.len() {
+            return set_error(Error::InvalidArgument);
+        }
+        if !value.is_empty() {
+            // SAFETY: `optval` and `optvallen` are non-null; caller supplied enough storage.
+            unsafe {
+                ptr::copy_nonoverlapping(value.as_ptr(), optval.cast::<u8>(), value.len());
+            }
+        }
+        // SAFETY: `optvallen` is non-null and points to caller-provided storage.
+        unsafe {
+            *optvallen = value.len();
+        }
+        clear_errno();
+        return 0;
+    }
     if available < std::mem::size_of::<c_int>() {
         return set_error(Error::InvalidArgument);
     }
@@ -2122,14 +2172,15 @@ pub extern "C" fn zmq_poller_new() -> *mut c_void {
 #[no_mangle]
 pub extern "C" fn zmq_poller_destroy(_poller: *mut *mut c_void) -> c_int {
     if _poller.is_null() {
-        return set_error(Error::InvalidArgument);
+        return set_error(Error::InvalidContext);
     }
     // SAFETY: `_poller` points to caller storage; inner pointer was allocated by `zmq_poller_new`.
     unsafe {
-        if !(*_poller).is_null() {
-            drop(Box::from_raw((*_poller).cast::<OpaquePoller>()));
-            *_poller = ptr::null_mut();
+        if (*_poller).is_null() {
+            return set_error(Error::InvalidContext);
         }
+        drop(Box::from_raw((*_poller).cast::<OpaquePoller>()));
+        *_poller = ptr::null_mut();
     }
     clear_errno();
     0
@@ -2156,16 +2207,22 @@ pub extern "C" fn zmq_poller_add(
     user_data: *mut c_void,
     events: i16,
 ) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
-    }
     let poller = match poller_from_raw(poller) {
         Ok(poller) => poller,
         Err(error) => return set_error(error),
     };
+    if let Err(error) = socket_from_raw(socket).and_then(|_| validate_poller_events(events)) {
+        return set_error(error);
+    }
     let mut entries = poller.entries.lock().map_err(|_| Error::InvalidArgument);
     match entries.as_mut() {
         Ok(entries) => {
+            if entries
+                .iter()
+                .any(|entry| !entry.is_fd && entry.socket == socket)
+            {
+                return set_error(Error::InvalidArgument);
+            }
             entries.push(PollerEntry {
                 socket,
                 fd: 0,
@@ -2187,21 +2244,27 @@ pub extern "C" fn zmq_poller_modify(
     events: i16,
 ) -> c_int {
     match poller_from_raw(poller) {
-        Ok(poller) => match poller.entries.lock() {
-            Ok(mut entries) => {
-                if let Some(entry) = entries
-                    .iter_mut()
-                    .find(|entry| !entry.is_fd && entry.socket == socket)
-                {
-                    entry.events = events;
-                    clear_errno();
-                    0
-                } else {
-                    set_error(Error::InvalidArgument)
-                }
+        Ok(poller) => {
+            if let Err(error) = socket_from_raw(socket).and_then(|_| validate_poller_events(events))
+            {
+                return set_error(error);
             }
-            Err(_) => set_error(Error::InvalidArgument),
-        },
+            match poller.entries.lock() {
+                Ok(mut entries) => {
+                    if let Some(entry) = entries
+                        .iter_mut()
+                        .find(|entry| !entry.is_fd && entry.socket == socket)
+                    {
+                        entry.events = events;
+                        clear_errno();
+                        0
+                    } else {
+                        set_error(Error::InvalidArgument)
+                    }
+                }
+                Err(_) => set_error(Error::InvalidArgument),
+            }
+        }
         Err(error) => set_error(error),
     }
 }
@@ -2209,19 +2272,24 @@ pub extern "C" fn zmq_poller_modify(
 #[no_mangle]
 pub extern "C" fn zmq_poller_remove(poller: *mut c_void, socket: *mut c_void) -> c_int {
     match poller_from_raw(poller) {
-        Ok(poller) => match poller.entries.lock() {
-            Ok(mut entries) => {
-                let previous_len = entries.len();
-                entries.retain(|entry| entry.is_fd || entry.socket != socket);
-                if entries.len() != previous_len {
-                    clear_errno();
-                    0
-                } else {
-                    set_error(Error::InvalidArgument)
-                }
+        Ok(poller) => {
+            if let Err(error) = socket_from_raw(socket) {
+                return set_error(error);
             }
-            Err(_) => set_error(Error::InvalidArgument),
-        },
+            match poller.entries.lock() {
+                Ok(mut entries) => {
+                    let previous_len = entries.len();
+                    entries.retain(|entry| entry.is_fd || entry.socket != socket);
+                    if entries.len() != previous_len {
+                        clear_errno();
+                        0
+                    } else {
+                        set_error(Error::InvalidArgument)
+                    }
+                }
+                Err(_) => set_error(Error::InvalidArgument),
+            }
+        }
         Err(error) => set_error(error),
     }
 }
@@ -2232,7 +2300,21 @@ pub extern "C" fn zmq_poller_wait(
     event: *mut ZmqPollerEvent,
     timeout: isize,
 ) -> c_int {
-    zmq_poller_wait_all(poller, event, 1, timeout)
+    let result = zmq_poller_wait_all(poller, event, 1, timeout);
+    if result < 0 {
+        if !event.is_null() {
+            // SAFETY: `event` is non-null and points to caller-provided storage.
+            unsafe {
+                (*event).socket = ptr::null_mut();
+                (*event).fd = invalid_zmq_fd();
+                (*event).user_data = ptr::null_mut();
+                (*event).events = 0;
+            }
+        }
+        result
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -2242,7 +2324,10 @@ pub extern "C" fn zmq_poller_wait_all(
     n_events: c_int,
     timeout: isize,
 ) -> c_int {
-    if n_events < 0 || (events.is_null() && n_events != 0) {
+    if events.is_null() && n_events != 0 {
+        return set_error(Error::InvalidContext);
+    }
+    if n_events < 0 {
         return set_error(Error::InvalidArgument);
     }
     let poller = match poller_from_raw(poller) {
@@ -2307,20 +2392,28 @@ pub extern "C" fn zmq_poller_add_fd(
     events: i16,
 ) -> c_int {
     match poller_from_raw(poller) {
-        Ok(poller) => match poller.entries.lock() {
-            Ok(mut entries) => {
-                entries.push(PollerEntry {
-                    socket: ptr::null_mut(),
-                    fd,
-                    user_data,
-                    events,
-                    is_fd: true,
-                });
-                clear_errno();
-                0
+        Ok(poller) => {
+            if let Err(error) = validate_poller_events(events) {
+                return set_error(error);
             }
-            Err(_) => set_error(Error::InvalidArgument),
-        },
+            match poller.entries.lock() {
+                Ok(mut entries) => {
+                    if entries.iter().any(|entry| entry.is_fd && entry.fd == fd) {
+                        return set_error(Error::InvalidArgument);
+                    }
+                    entries.push(PollerEntry {
+                        socket: ptr::null_mut(),
+                        fd,
+                        user_data,
+                        events,
+                        is_fd: true,
+                    });
+                    clear_errno();
+                    0
+                }
+                Err(_) => set_error(Error::InvalidArgument),
+            }
+        }
         Err(error) => set_error(error),
     }
 }
@@ -2328,21 +2421,26 @@ pub extern "C" fn zmq_poller_add_fd(
 #[no_mangle]
 pub extern "C" fn zmq_poller_modify_fd(poller: *mut c_void, fd: ZmqFd, events: i16) -> c_int {
     match poller_from_raw(poller) {
-        Ok(poller) => match poller.entries.lock() {
-            Ok(mut entries) => {
-                if let Some(entry) = entries
-                    .iter_mut()
-                    .find(|entry| entry.is_fd && entry.fd == fd)
-                {
-                    entry.events = events;
-                    clear_errno();
-                    0
-                } else {
-                    set_error(Error::InvalidArgument)
-                }
+        Ok(poller) => {
+            if let Err(error) = validate_poller_events(events) {
+                return set_error(error);
             }
-            Err(_) => set_error(Error::InvalidArgument),
-        },
+            match poller.entries.lock() {
+                Ok(mut entries) => {
+                    if let Some(entry) = entries
+                        .iter_mut()
+                        .find(|entry| entry.is_fd && entry.fd == fd)
+                    {
+                        entry.events = events;
+                        clear_errno();
+                        0
+                    } else {
+                        set_error(Error::InvalidArgument)
+                    }
+                }
+                Err(_) => set_error(Error::InvalidArgument),
+            }
+        }
         Err(error) => set_error(error),
     }
 }
@@ -2370,13 +2468,31 @@ pub extern "C" fn zmq_poller_remove_fd(poller: *mut c_void, fd: ZmqFd) -> c_int 
 #[no_mangle]
 pub extern "C" fn zmq_socket_get_peer_state(
     socket: *mut c_void,
-    _routing_id: *const c_void,
-    _routing_id_size: usize,
+    routing_id: *const c_void,
+    routing_id_size: usize,
 ) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    if let Err(Error::NotSupported) = socket.inner.peer_state(0) {
+        return set_error(Error::NotSupported);
     }
-    unsupported_int("zmq_socket_get_peer_state")
+    if routing_id.is_null() && routing_id_size != 0 {
+        return set_error(Error::InvalidArgument);
+    }
+    if routing_id_size != std::mem::size_of::<u32>() {
+        return set_error(Error::HostUnreachable);
+    }
+    // SAFETY: `routing_id` is non-null because `routing_id_size` is exactly `u32` size.
+    let routing_id = unsafe { *(routing_id.cast::<u32>()) };
+    match socket.inner.peer_state(routing_id) {
+        Ok(state) => {
+            clear_errno();
+            state
+        }
+        Err(error) => set_error(error),
+    }
 }
 
 #[no_mangle]
@@ -2387,18 +2503,27 @@ pub extern "C" fn zmq_socket_monitor_versioned(
     _event_version: c_int,
     _type: c_int,
 ) -> c_int {
-    if endpoint.is_null() {
-        return set_error(Error::InvalidArgument);
-    }
     let socket = match socket_from_raw(socket) {
         Ok(socket) => socket,
         Err(error) => return set_error(error),
     };
+    if endpoint.is_null() {
+        return match socket.inner.stop_monitor() {
+            Ok(()) => {
+                clear_errno();
+                0
+            }
+            Err(error) => set_error(error),
+        };
+    }
     let endpoint = match endpoint_from_raw(endpoint) {
         Ok(endpoint) => endpoint,
         Err(error) => return set_error(error),
     };
-    match socket.inner.monitor(endpoint, events) {
+    match socket
+        .inner
+        .monitor(endpoint, events, _event_version, _type)
+    {
         Ok(()) => {
             clear_errno();
             0
@@ -2409,10 +2534,17 @@ pub extern "C" fn zmq_socket_monitor_versioned(
 
 #[no_mangle]
 pub extern "C" fn zmq_socket_monitor_pipes_stats(socket: *mut c_void) -> c_int {
-    if let Err(error) = socket_from_raw(socket) {
-        return set_error(error);
+    let socket = match socket_from_raw(socket) {
+        Ok(socket) => socket,
+        Err(error) => return set_error(error),
+    };
+    match socket.inner.monitor_pipes_stats() {
+        Ok(()) => {
+            clear_errno();
+            0
+        }
+        Err(error) => set_error(error),
     }
-    unsupported_int("zmq_socket_monitor_pipes_stats")
 }
 
 #[no_mangle]

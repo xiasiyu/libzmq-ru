@@ -191,9 +191,12 @@ pub const ZMQ_GSSAPI_NT_KRB5_PRINCIPAL: i32 = 2;
 
 pub const ZMQ_POLLIN: i32 = 1;
 pub const ZMQ_POLLOUT: i32 = 2;
+pub const ZMQ_POLLERR: i32 = 4;
+pub const ZMQ_POLLPRI: i32 = 8;
 
 pub const ZMQ_EVENT_CONNECTED: i32 = 0x0001;
 pub const ZMQ_EVENT_LISTENING: i32 = 0x0008;
 pub const ZMQ_EVENT_CLOSED: i32 = 0x0080;
 pub const ZMQ_EVENT_DISCONNECTED: i32 = 0x0200;
 pub const ZMQ_EVENT_ALL: i32 = 0xFFFF;
+pub const ZMQ_EVENT_PIPES_STATS: i32 = 0x10000;

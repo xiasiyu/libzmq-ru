@@ -67,6 +67,8 @@ Fuzz smoke testing is not available yet; `fuzz/` currently contains only the tar
 
 - Real GSSAPI interop requires a configured Kerberos realm, principal/keytab, or credential cache.
 - `norm://` socket transport still needs the original libzmq stream/event-loop semantics. Sys-level NORM data-object send/receive and a feature-gated PUB/SUB single-frame data-object path are proven.
+- Full `ROUTER` blob routing-id parity is still incomplete. The C ABI now covers inproc `zmq_socket_get_peer_state` for the current numeric peer-id model, but TCP/IPC blob identity framing remains release-blocking for full compatibility.
+- `zmq_socket_monitor_pipes_stats` still needs TCP/IPC I/O-thread queue-stat parity; inproc v2 queue-stat event publication is covered.
 - PGM/EPGM requires OpenPGM, which is unavailable in this environment.
 - TIPC/VMCI/VSOCK require platform/kernel support that is unavailable on the current macOS host.
 - Windows DLL export validation requires a Windows-capable runner.

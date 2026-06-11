@@ -192,6 +192,23 @@ impl InprocEndpoint {
         Ok(peers.first().map(|peer| Arc::clone(&peer.inbox)))
     }
 
+    pub(crate) fn peer_count(&self) -> Result<usize> {
+        Ok(self.peers.lock().map_err(|_| Error::InvalidSocket)?.len())
+    }
+
+    pub(crate) fn peer_queue_depths(&self) -> Result<Vec<usize>> {
+        let peers = self.peers.lock().map_err(|_| Error::InvalidSocket)?;
+        peers
+            .iter()
+            .map(|peer| {
+                peer.inbox
+                    .lock()
+                    .map_err(|_| Error::InvalidSocket)
+                    .map(|queue| queue.len())
+            })
+            .collect()
+    }
+
     pub(crate) fn next_peer(&self) -> Result<Option<MessageQueue>> {
         let peers = self.peers.lock().map_err(|_| Error::InvalidSocket)?;
         if peers.is_empty() {
@@ -333,6 +350,36 @@ fn socket_type_accepts_message(
     }
 }
 
+fn atoi_i32(bytes: &[u8]) -> i32 {
+    let mut index = 0;
+    while bytes
+        .get(index)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c))
+    {
+        index += 1;
+    }
+    let sign = match bytes.get(index) {
+        Some(b'-') => {
+            index += 1;
+            -1
+        }
+        Some(b'+') => {
+            index += 1;
+            1
+        }
+        _ => 1,
+    };
+    let mut value = 0i32;
+    while let Some(digit) = bytes
+        .get(index)
+        .and_then(|byte| byte.is_ascii_digit().then_some((byte - b'0') as i32))
+    {
+        value = value.saturating_mul(10).saturating_add(digit);
+        index += 1;
+    }
+    value.saturating_mul(sign)
+}
+
 #[derive(Debug, Clone)]
 struct ContextOptions {
     io_threads: i32,
@@ -341,6 +388,10 @@ struct ContextOptions {
     thread_priority: i32,
     thread_sched_policy: i32,
     zero_copy_recv: i32,
+    thread_name_prefix: Vec<u8>,
+    thread_affinity_cpus: HashSet<i32>,
+    ipv6: bool,
+    blocky: bool,
 }
 
 impl Default for ContextOptions {
@@ -351,9 +402,19 @@ impl Default for ContextOptions {
             max_msgsz: i32::MAX,
             thread_priority: crate::ZMQ_THREAD_PRIORITY_DFLT,
             thread_sched_policy: crate::ZMQ_THREAD_SCHED_POLICY_DFLT,
-            zero_copy_recv: 0,
+            zero_copy_recv: 1,
+            thread_name_prefix: Vec::new(),
+            thread_affinity_cpus: HashSet::new(),
+            ipv6: false,
+            blocky: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ContextSocketDefaults {
+    pub(crate) ipv6: bool,
+    pub(crate) blocky: bool,
 }
 
 impl Context {
@@ -384,11 +445,31 @@ impl Context {
     pub fn socket(&self, socket_type: SocketType) -> Result<Socket> {
         self.ensure_running()?;
         let id = self.shared.next_socket_id.fetch_add(1, Ordering::Relaxed);
-        Ok(Socket::new(id, socket_type, Arc::clone(&self.shared)))
+        Ok(Socket::new(
+            id,
+            socket_type,
+            Arc::clone(&self.shared),
+            self.socket_defaults()?,
+        ))
     }
 
     pub fn set_option(&self, option: i32, value: i32) -> Result<()> {
-        if matches!(option, crate::ZMQ_IO_THREADS | crate::ZMQ_MAX_SOCKETS) && value < 0 {
+        if matches!(
+            option,
+            crate::ZMQ_IO_THREADS
+                | crate::ZMQ_MAX_MSGSZ
+                | crate::ZMQ_THREAD_PRIORITY
+                | crate::ZMQ_THREAD_SCHED_POLICY
+                | crate::ZMQ_THREAD_AFFINITY_CPU_ADD
+                | crate::ZMQ_THREAD_AFFINITY_CPU_REMOVE
+                | crate::ZMQ_ZERO_COPY_RECV
+                | crate::ZMQ_IPV6
+                | crate::ZMQ_BLOCKY
+        ) && value < 0
+        {
+            return Err(Error::InvalidArgument);
+        }
+        if option == crate::ZMQ_MAX_SOCKETS && value < 1 {
             return Err(Error::InvalidArgument);
         }
 
@@ -401,11 +482,38 @@ impl Context {
             crate::ZMQ_IO_THREADS => options.io_threads = value,
             crate::ZMQ_MAX_SOCKETS => options.max_sockets = value,
             crate::ZMQ_MAX_MSGSZ => options.max_msgsz = value,
+            crate::ZMQ_IPV6 => options.ipv6 = value != 0,
+            crate::ZMQ_BLOCKY => options.blocky = value != 0,
             crate::ZMQ_THREAD_PRIORITY => options.thread_priority = value,
             crate::ZMQ_THREAD_SCHED_POLICY => options.thread_sched_policy = value,
             crate::ZMQ_ZERO_COPY_RECV => options.zero_copy_recv = i32::from(value != 0),
-            crate::ZMQ_THREAD_AFFINITY_CPU_ADD | crate::ZMQ_THREAD_AFFINITY_CPU_REMOVE => {}
-            crate::ZMQ_THREAD_NAME_PREFIX => {}
+            crate::ZMQ_THREAD_AFFINITY_CPU_ADD => {
+                options.thread_affinity_cpus.insert(value);
+            }
+            crate::ZMQ_THREAD_AFFINITY_CPU_REMOVE => {
+                if !options.thread_affinity_cpus.remove(&value) {
+                    return Err(Error::InvalidArgument);
+                }
+            }
+            crate::ZMQ_THREAD_NAME_PREFIX => {
+                options.thread_name_prefix = value.to_string().into_bytes()
+            }
+            _ => return Err(Error::InvalidArgument),
+        }
+        Ok(())
+    }
+
+    pub fn set_option_bytes(&self, option: i32, value: &[u8]) -> Result<()> {
+        let mut options = self
+            .shared
+            .options
+            .lock()
+            .map_err(|_| Error::InvalidContext)?;
+        match option {
+            crate::ZMQ_THREAD_NAME_PREFIX if !value.is_empty() && value.len() <= 16 => {
+                options.thread_name_prefix = value.to_vec();
+            }
+            crate::ZMQ_THREAD_NAME_PREFIX => return Err(Error::InvalidArgument),
             _ => return Err(Error::InvalidArgument),
         }
         Ok(())
@@ -420,13 +528,40 @@ impl Context {
         match option {
             crate::ZMQ_IO_THREADS => Ok(options.io_threads),
             crate::ZMQ_MAX_SOCKETS => Ok(options.max_sockets),
-            crate::ZMQ_SOCKET_LIMIT => Ok(options.max_sockets),
+            crate::ZMQ_SOCKET_LIMIT => Ok(65_535),
             crate::ZMQ_MAX_MSGSZ => Ok(options.max_msgsz),
             crate::ZMQ_MSG_T_SIZE => Ok(64),
+            crate::ZMQ_IPV6 => Ok(i32::from(options.ipv6)),
+            crate::ZMQ_BLOCKY => Ok(i32::from(options.blocky)),
             crate::ZMQ_THREAD_SCHED_POLICY => Ok(options.thread_sched_policy),
+            crate::ZMQ_THREAD_NAME_PREFIX => Ok(atoi_i32(&options.thread_name_prefix)),
             crate::ZMQ_ZERO_COPY_RECV => Ok(options.zero_copy_recv),
             _ => Err(Error::InvalidArgument),
         }
+    }
+
+    pub fn get_option_bytes(&self, option: i32) -> Result<Vec<u8>> {
+        let options = self
+            .shared
+            .options
+            .lock()
+            .map_err(|_| Error::InvalidContext)?;
+        match option {
+            crate::ZMQ_THREAD_NAME_PREFIX => Ok(options.thread_name_prefix.clone()),
+            _ => Err(Error::InvalidArgument),
+        }
+    }
+
+    pub(crate) fn socket_defaults(&self) -> Result<ContextSocketDefaults> {
+        let options = self
+            .shared
+            .options
+            .lock()
+            .map_err(|_| Error::InvalidContext)?;
+        Ok(ContextSocketDefaults {
+            ipv6: options.ipv6,
+            blocky: options.blocky,
+        })
     }
 
     pub fn is_terminated(&self) -> bool {

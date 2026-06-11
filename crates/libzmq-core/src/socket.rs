@@ -1,6 +1,7 @@
 use crate::constants::*;
 use crate::context::{
-    ContextShared, InprocEndpoint, MessageQueue, SubscriptionSet, SubscriptionState, WelcomeMessage,
+    ContextShared, ContextSocketDefaults, InprocEndpoint, MessageQueue, SubscriptionSet,
+    SubscriptionState, WelcomeMessage,
 };
 #[cfg(feature = "norm")]
 use crate::transport::NormEndpoint;
@@ -314,6 +315,7 @@ fn curve_session(
 struct MonitorState {
     endpoint_name: String,
     events: u64,
+    event_version: i32,
 }
 
 #[derive(Debug)]
@@ -632,11 +634,21 @@ impl SecurityOptions {
 }
 
 impl Socket {
-    pub(crate) fn new(id: usize, socket_type: SocketType, context: Arc<ContextShared>) -> Self {
+    pub(crate) fn new(
+        id: usize,
+        socket_type: SocketType,
+        context: Arc<ContextShared>,
+        defaults: ContextSocketDefaults,
+    ) -> Self {
+        let options = SocketOptions {
+            linger: if defaults.blocky { -1 } else { 0 },
+            ipv6: defaults.ipv6,
+            ..SocketOptions::default()
+        };
         Self {
             id,
             socket_type,
-            options: Mutex::new(SocketOptions::default()),
+            options: Mutex::new(options),
             context,
             inbox: Arc::new(Mutex::new(VecDeque::new())),
             subscriptions: Arc::new(Mutex::new(SubscriptionState::default())),
@@ -835,10 +847,66 @@ impl Socket {
         }
     }
 
-    pub fn monitor(&self, endpoint: &str, events: u64) -> Result<()> {
+    pub fn peer_state(&self, routing_id: u32) -> Result<i32> {
+        if self.socket_type != SocketType::Router {
+            return Err(Error::NotSupported);
+        }
+        let inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
+        let Some(bound_endpoint) = &inproc.bound_endpoint else {
+            return Err(Error::HostUnreachable);
+        };
+        let Some(outbox) = bound_endpoint.peer_by_id(routing_id as usize)? else {
+            return Err(Error::HostUnreachable);
+        };
+        let sndhwm = self
+            .options
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .sndhwm;
+        let queued = outbox.lock().map_err(|_| Error::InvalidSocket)?.len();
+        if sndhwm == 0 || queued < sndhwm as usize {
+            Ok(ZMQ_POLLOUT)
+        } else {
+            Ok(0)
+        }
+    }
+
+    pub fn monitor(
+        &self,
+        endpoint: &str,
+        events: u64,
+        event_version: i32,
+        socket_type: i32,
+    ) -> Result<()> {
+        if event_version == 1 && events >> 16 != 0 {
+            return Err(Error::InvalidArgument);
+        }
+        if !matches!(socket_type, ZMQ_PAIR | ZMQ_PUB | ZMQ_PUSH) {
+            return Err(Error::InvalidArgument);
+        }
+        let monitor_socket_type = SocketType::try_from(socket_type)?;
         let endpoint_name = endpoint
             .strip_prefix("inproc://")
-            .ok_or(Error::NotSupported)?;
+            .ok_or(Error::ProtocolNotSupported)?;
+        self.stop_monitor()?;
+        let monitor_inbox = Arc::new(Mutex::new(VecDeque::new()));
+        self.context.bind_inproc(
+            endpoint_name,
+            0,
+            monitor_inbox,
+            monitor_socket_type,
+            Arc::new(Mutex::new(SubscriptionState::default())),
+            Arc::new(Mutex::new(None)),
+        )?;
+        *self.monitor.lock().map_err(|_| Error::InvalidSocket)? = Some(MonitorState {
+            endpoint_name: endpoint_name.to_string(),
+            events,
+            event_version,
+        });
+        Ok(())
+    }
+
+    pub fn stop_monitor(&self) -> Result<()> {
         if let Some(previous) = self
             .monitor
             .lock()
@@ -847,20 +915,26 @@ impl Socket {
         {
             let _ = self.context.unbind_inproc(&previous.endpoint_name);
         }
-        let monitor_inbox = Arc::new(Mutex::new(VecDeque::new()));
-        self.context.bind_inproc(
-            endpoint_name,
-            0,
-            monitor_inbox,
-            SocketType::Pair,
-            Arc::new(Mutex::new(SubscriptionState::default())),
-            Arc::new(Mutex::new(None)),
-        )?;
-        *self.monitor.lock().map_err(|_| Error::InvalidSocket)? = Some(MonitorState {
-            endpoint_name: endpoint_name.to_string(),
-            events,
-        });
         Ok(())
+    }
+
+    pub fn monitor_pipes_stats(&self) -> Result<()> {
+        let Some(events) = self
+            .monitor
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .as_ref()
+            .map(|monitor| monitor.events)
+        else {
+            return Err(Error::InvalidArgument);
+        };
+        if events & ZMQ_EVENT_PIPES_STATS as u64 == 0 {
+            return Err(Error::InvalidArgument);
+        }
+        if !self.has_monitorable_pipe()? {
+            return Err(Error::Again);
+        }
+        self.emit_monitor_pipe_stats()
     }
 
     pub fn send(&self, mut message: Message, flags: i32) -> Result<usize> {
@@ -2793,6 +2867,7 @@ impl Socket {
             .map(|monitor| MonitorState {
                 endpoint_name: monitor.endpoint_name.clone(),
                 events: monitor.events,
+                event_version: monitor.event_version,
             })
         else {
             return Ok(());
@@ -2807,6 +2882,16 @@ impl Socket {
             return Ok(());
         };
 
+        if monitor.event_version == 2 {
+            return Self::push_monitor_event_v2(
+                &outbox,
+                event as u64,
+                &[value as u64],
+                endpoint,
+                "",
+            );
+        }
+
         let mut event_frame = Vec::with_capacity(6);
         event_frame.extend_from_slice(&(event as u16).to_ne_bytes());
         event_frame.extend_from_slice(&value.to_ne_bytes());
@@ -2818,6 +2903,131 @@ impl Socket {
         queue.push_back(event_message);
         queue.push_back(endpoint_message);
         Ok(())
+    }
+
+    fn emit_monitor_pipe_stats(&self) -> Result<()> {
+        let Some(monitor_endpoint_name) = self
+            .monitor
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .as_ref()
+            .map(|monitor| monitor.endpoint_name.clone())
+        else {
+            return Err(Error::InvalidArgument);
+        };
+        let Some(monitor_endpoint) = self.context.inproc_endpoint(&monitor_endpoint_name)? else {
+            return Ok(());
+        };
+        let Some(monitor_outbox) = monitor_endpoint.first_peer()? else {
+            return Ok(());
+        };
+        let inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
+        if let Some(endpoint) = &inproc.bound_endpoint {
+            let endpoint_uri = inproc
+                .bound_endpoint_name
+                .as_deref()
+                .map(|name| format!("inproc://{name}"))
+                .unwrap_or_default();
+            let depths = endpoint.peer_queue_depths()?;
+            drop(inproc);
+            for outbound_depth in depths {
+                Self::push_monitor_event_v2(
+                    &monitor_outbox,
+                    ZMQ_EVENT_PIPES_STATS as u64,
+                    &[outbound_depth as u64, 0],
+                    &endpoint_uri,
+                    &endpoint_uri,
+                )?;
+            }
+            return Ok(());
+        }
+        if let Some(outbox) = &inproc.direct_outbox {
+            let endpoint_uri = inproc
+                .connected_endpoint
+                .as_deref()
+                .map(|name| format!("inproc://{name}"))
+                .unwrap_or_default();
+            let outbound_depth = outbox.lock().map_err(|_| Error::InvalidSocket)?.len();
+            drop(inproc);
+            Self::push_monitor_event_v2(
+                &monitor_outbox,
+                ZMQ_EVENT_PIPES_STATS as u64,
+                &[outbound_depth as u64, 0],
+                &endpoint_uri,
+                &endpoint_uri,
+            )?;
+            return Ok(());
+        }
+        Err(Error::NotSupported)
+    }
+
+    fn push_monitor_event_v2(
+        outbox: &MessageQueue,
+        event: u64,
+        values: &[u64],
+        local_endpoint: &str,
+        remote_endpoint: &str,
+    ) -> Result<()> {
+        let mut queue = outbox.lock().map_err(|_| Error::InvalidSocket)?;
+        let mut event_message = Message::from_vec(event.to_ne_bytes().to_vec());
+        event_message.set_more(true);
+        queue.push_back(event_message);
+
+        let mut count_message = Message::from_vec((values.len() as u64).to_ne_bytes().to_vec());
+        count_message.set_more(true);
+        queue.push_back(count_message);
+
+        for value in values {
+            let mut value_message = Message::from_vec(value.to_ne_bytes().to_vec());
+            value_message.set_more(true);
+            queue.push_back(value_message);
+        }
+
+        let mut local_message = Message::from_vec(local_endpoint.as_bytes().to_vec());
+        local_message.set_more(true);
+        queue.push_back(local_message);
+        queue.push_back(Message::from_vec(remote_endpoint.as_bytes().to_vec()));
+        Ok(())
+    }
+
+    fn has_monitorable_pipe(&self) -> Result<bool> {
+        let inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
+        if inproc.direct_outbox.is_some() {
+            return Ok(true);
+        }
+        if inproc.connected_endpoint.as_ref().is_some_and(|endpoint| {
+            self.context
+                .inproc_endpoint(endpoint)
+                .is_ok_and(|endpoint| endpoint.is_some())
+        }) {
+            return Ok(true);
+        }
+        if let Some(endpoint) = &inproc.bound_endpoint {
+            if endpoint.peer_count()? != 0 {
+                return Ok(true);
+            }
+        }
+        drop(inproc);
+
+        if self
+            .tcp
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .stream
+            .is_some()
+        {
+            return Ok(true);
+        }
+        if self
+            .ipc
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .stream
+            .is_some()
+        {
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     fn apply_outgoing_routing_id(&self, message: &mut Message) -> Result<()> {

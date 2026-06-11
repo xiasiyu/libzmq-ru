@@ -14,9 +14,10 @@ This document tracks release blockers and validation items that cannot be truthf
 - `pgm://` and `epgm://` transports: require OpenPGM availability and implementation validation.
 - `tipc://`, `vmci://`, and `vsock://` transports: require corresponding platform/kernel support and implementation validation.
 - UDP `RADIO`/`DISH` transport parity needs oracle coverage for original group and endpoint semantics beyond the current local round trips.
-- Custom socket routing identity behavior still needs full original parity: C ABI option storage/validation and inproc `ZMQ_PROBE_ROUTER` smoke behavior are covered, but routing paths still use the current internal numeric peer-id model and do not yet match original TCP/IPC identity framing.
+- Custom socket routing identity behavior still needs full original parity: C ABI option storage/validation, inproc `ZMQ_PROBE_ROUTER`, and inproc `zmq_socket_get_peer_state` numeric peer-id behavior are covered, but routing paths still use the current internal numeric peer-id model and do not yet match original TCP/IPC blob identity framing.
 - Draft hello/disconnect/hiccup message options now have original set/clear surface behavior, but full pipe/session delivery semantics are not complete yet.
 - XPUB/XSUB draft option surface is partially covered, including `ZMQ_TOPICS_COUNT`, but full manual-last and only-first-subscribe forwarding semantics still need parity work.
+- `zmq_socket_monitor_pipes_stats` now covers original precondition errors and inproc v2 queue-stat event publication, but TCP/IPC I/O-thread queue-stat parity remains incomplete.
 
 ## Test Infrastructure Gaps
 
@@ -40,3 +41,17 @@ This document tracks release blockers and validation items that cannot be truthf
 - Draft/control integer socket options now cover original defaults and validation for reconnect-stop, priority, in/out batch sizes, loopback fastpath, and set-only busy-poll behavior.
 - `ZMQ_HELLO_MSG`, `ZMQ_DISCONNECT_MSG`, and `ZMQ_HICCUP_MSG` now support original set/clear C ABI option shape and remain non-gettable like original libzmq.
 - `ZMQ_TOPICS_COUNT`, `ZMQ_XPUB_MANUAL_LAST_VALUE`, `ZMQ_ONLY_FIRST_SUBSCRIBE`, and `ZMQ_XSUB_VERBOSE_UNSUBSCRIBE` now have native/C ABI option-surface coverage for local XPUB/XSUB cases.
+- `zmq_socket_get_peer_state` now reports `ZMQ_POLLOUT`, HWM-full `0`, `ENOTSUP`, and `EHOSTUNREACH` for the current inproc `ROUTER` numeric peer-id path.
+- `zmq_socket_monitor` and `zmq_socket_monitor_versioned` now return original `EPROTONOSUPPORT` for non-`inproc://` monitor endpoints.
+- `zmq_socket_monitor` and `zmq_socket_monitor_versioned` now support original null-endpoint monitor deregistration behavior.
+- `zmq_socket_monitor_versioned` now binds monitor endpoints with the requested `PAIR`, `PUB`, or `PUSH` socket type instead of only validating the type argument.
+- `zmq_socket_monitor_pipes_stats` now returns original `ENOTSOCK`, `EINVAL`, and `EAGAIN` precondition errors and publishes inproc v2 queue-stat events instead of blanket `ENOTSUP`.
+- `zmq_msg_gets` now returns `EINVAL` for missing metadata properties, matching original libzmq.
+- `zmq_strerror(EHOSTUNREACH)` now returns original `Host unreachable` text for the libzmq custom errno.
+- `zmq_ctx_set_ext` and `zmq_ctx_get_ext` now support original `ZMQ_THREAD_NAME_PREFIX` string round-trips and validation.
+- `ZMQ_THREAD_PRIORITY` and `ZMQ_THREAD_SCHED_POLICY` context options now reject negative values like original libzmq.
+- `ZMQ_MAX_MSGSZ` and `ZMQ_ZERO_COPY_RECV` context options now reject negative values like original libzmq.
+- `ZMQ_THREAD_AFFINITY_CPU_ADD` and `ZMQ_THREAD_AFFINITY_CPU_REMOVE` now validate negative values and missing removals like original libzmq.
+- `ZMQ_IPV6`, `ZMQ_BLOCKY`, and `ZMQ_ZERO_COPY_RECV` context defaults now match original libzmq, and new sockets inherit context IPv6/blocky defaults.
+- `ZMQ_MAX_SOCKETS` now rejects zero, and `ZMQ_SOCKET_LIMIT` reports the process socket ceiling instead of the current max-sockets setting.
+- Poller C ABI helpers now match original errno behavior for direct null pollers, null socket registration/removal, invalid event masks, duplicate socket/fd registration, and `zmq_poller_wait` success return shape.
