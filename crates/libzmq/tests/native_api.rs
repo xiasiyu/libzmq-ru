@@ -6,12 +6,12 @@ use libzmq::{
     ZMQ_LINGER, ZMQ_LOOPBACK_FASTPATH, ZMQ_MAX_SOCKETS, ZMQ_MECHANISM, ZMQ_MULTICAST_LOOP,
     ZMQ_NORM_BLOCK_SIZE, ZMQ_NORM_BUFFER_SIZE, ZMQ_NORM_CC, ZMQ_NORM_CCE, ZMQ_NORM_MODE,
     ZMQ_NORM_NUM_AUTOPARITY, ZMQ_NORM_NUM_PARITY, ZMQ_NORM_PUSH, ZMQ_NORM_SEGMENT_SIZE,
-    ZMQ_NORM_UNICAST_NACK, ZMQ_NULL, ZMQ_OUT_BATCH_SIZE, ZMQ_PLAIN, ZMQ_PLAIN_PASSWORD,
-    ZMQ_PLAIN_SERVER, ZMQ_PLAIN_USERNAME, ZMQ_PRIORITY, ZMQ_PROBE_ROUTER, ZMQ_RCVHWM, ZMQ_RCVMORE,
-    ZMQ_RECONNECT_STOP, ZMQ_REQ_RELAXED, ZMQ_ROUTER_HANDOVER, ZMQ_ROUTER_MANDATORY, ZMQ_SNDHWM,
-    ZMQ_SNDMORE, ZMQ_TOPICS_COUNT, ZMQ_TYPE, ZMQ_XPUB_MANUAL, ZMQ_XPUB_MANUAL_LAST_VALUE,
-    ZMQ_XPUB_NODROP, ZMQ_XPUB_VERBOSE, ZMQ_XPUB_WELCOME_MSG, ZMQ_XSUB_VERBOSE_UNSUBSCRIBE,
-    ZMQ_ZAP_DOMAIN,
+    ZMQ_NORM_UNICAST_NACK, ZMQ_NULL, ZMQ_ONLY_FIRST_SUBSCRIBE, ZMQ_OUT_BATCH_SIZE, ZMQ_PLAIN,
+    ZMQ_PLAIN_PASSWORD, ZMQ_PLAIN_SERVER, ZMQ_PLAIN_USERNAME, ZMQ_PRIORITY, ZMQ_PROBE_ROUTER,
+    ZMQ_RCVHWM, ZMQ_RCVMORE, ZMQ_RECONNECT_STOP, ZMQ_REQ_RELAXED, ZMQ_ROUTER_HANDOVER,
+    ZMQ_ROUTER_MANDATORY, ZMQ_SNDHWM, ZMQ_SNDMORE, ZMQ_TOPICS_COUNT, ZMQ_TYPE, ZMQ_XPUB_MANUAL,
+    ZMQ_XPUB_MANUAL_LAST_VALUE, ZMQ_XPUB_NODROP, ZMQ_XPUB_VERBOSE, ZMQ_XPUB_WELCOME_MSG,
+    ZMQ_XSUB_VERBOSE_UNSUBSCRIBE, ZMQ_ZAP_DOMAIN,
 };
 use std::io::{Read, Write};
 use std::net::{TcpListener, UdpSocket};
@@ -1447,6 +1447,57 @@ fn native_xpub_manual_last_value_delivers_to_last_subscriber() {
     assert_eq!(sub2.recv().unwrap().data(), b"topic");
     assert_eq!(sub2.recv().unwrap().data(), b"topic");
     assert_eq!(sub1.recv().unwrap().data(), b"topic");
+}
+
+#[test]
+fn native_xpub_manual_accepts_raw_xsub_subscription() {
+    let ctx = Context::new().unwrap();
+    let publisher = ctx.socket(SocketType::Xpub).unwrap();
+    let subscriber = ctx.socket(SocketType::Xsub).unwrap();
+
+    publisher.set_option_i32(ZMQ_XPUB_MANUAL, 1).unwrap();
+    publisher.bind("inproc://native_xpub_manual_raw").unwrap();
+    subscriber
+        .connect("inproc://native_xpub_manual_raw")
+        .unwrap();
+
+    subscriber.send(b"\x01A".as_slice()).unwrap();
+    assert_eq!(publisher.recv().unwrap().data(), b"\x01A");
+
+    publisher.subscribe(b"B").unwrap();
+    publisher.send("A").unwrap();
+    publisher.send("B").unwrap();
+    assert_eq!(subscriber.recv().unwrap().data(), b"B");
+}
+
+#[test]
+fn native_only_first_subscribe_forwards_multipart_user_frames() {
+    let ctx = Context::new().unwrap();
+    let publisher = ctx.socket(SocketType::Xpub).unwrap();
+    let subscriber = ctx.socket(SocketType::Xsub).unwrap();
+
+    publisher
+        .set_option_i32(ZMQ_ONLY_FIRST_SUBSCRIBE, 1)
+        .unwrap();
+    subscriber
+        .set_option_i32(ZMQ_ONLY_FIRST_SUBSCRIBE, 1)
+        .unwrap();
+    publisher.bind("inproc://native_xpub_only_first").unwrap();
+    subscriber
+        .connect("inproc://native_xpub_only_first")
+        .unwrap();
+
+    for (first, second) in [
+        (b"ABC".as_slice(), b"\0BC".as_slice()),
+        (b"ABC".as_slice(), b"\x01BC".as_slice()),
+        (b"\x01BC".as_slice(), b"\x01CD".as_slice()),
+        (b"\0BC".as_slice(), b"\0CD".as_slice()),
+    ] {
+        subscriber.send_with_flags(first, ZMQ_SNDMORE).unwrap();
+        subscriber.send(second).unwrap();
+        assert_eq!(publisher.recv().unwrap().data(), first);
+        assert_eq!(publisher.recv().unwrap().data(), second);
+    }
 }
 
 #[test]

@@ -23,7 +23,7 @@ The C ABI target is original `libzmq` 4.3.6. Public headers live in `include/` a
 - Original arbitrary blob routing-id parity is incomplete: `zmq_socket_get_peer_state` currently accepts the rewrite's internal `u32` peer id and the decimal `Routing-Id` blob exposed on received messages. TCP/IPC ZMTP READY `Identity` metadata is now encoded, saved, and exposed on received messages for UTF-8 routing ids, while full TCP/IPC `ROUTER` identity framing still needs original arbitrary binary blob semantics.
 - `zmq_socket_monitor_pipes_stats` does not yet provide original I/O-thread queue-depth oracle parity for TCP/IPC beyond established synchronous stream event publication.
 - `ZMQ_HICCUP_MSG` delivery and TCP/IPC session delivery for hello/disconnect/hiccup lifecycle messages remain incomplete.
-- XPUB manual-last same-topic inproc value delivery is covered for the last subscribing peer, but proxy/multipart manual-last edge cases and only-first-subscribe multipart forwarding semantics remain incomplete beyond option validation and covered inproc notification/manual accept behavior.
+- XPUB manual-last same-topic inproc value delivery is covered for the last subscribing peer, and `ZMQ_ONLY_FIRST_SUBSCRIBE` covers raw multipart user-frame forwarding. Proxy/multipart manual-last edge cases remain incomplete beyond option validation and covered inproc notification/manual accept behavior.
 - Windows DLL export validation has not been run in this macOS environment.
 
 ## Validation Commands

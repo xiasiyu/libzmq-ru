@@ -117,6 +117,8 @@ pub struct Socket {
     monitor: Mutex<Option<MonitorState>>,
     inproc_fast_send_enabled: AtomicBool,
     last_recv_more: AtomicBool,
+    xsub_send_more: AtomicBool,
+    xsub_process_subscribe: AtomicBool,
     last_recv_routing_id: Mutex<Option<u32>>,
     pattern_state: Mutex<Option<PatternState>>,
 }
@@ -674,6 +676,8 @@ impl Socket {
             monitor: Mutex::new(None),
             inproc_fast_send_enabled: AtomicBool::new(true),
             last_recv_more: AtomicBool::new(false),
+            xsub_send_more: AtomicBool::new(false),
+            xsub_process_subscribe: AtomicBool::new(false),
             last_recv_routing_id: Mutex::new(None),
             pattern_state: Mutex::new(match socket_type {
                 SocketType::Req => Some(PatternState::ReadyToSend),
@@ -961,6 +965,10 @@ impl Socket {
         self.apply_reply_routing_id(&mut message)?;
         self.apply_outgoing_routing_id(&mut message)?;
         let more = message.more();
+        if self.try_process_xsub_subscription_send(&message)? {
+            self.after_pattern_send(more)?;
+            return Ok(size);
+        }
         let Some(message) = self.try_send_inproc_fast(message)? else {
             self.after_pattern_send(more)?;
             return Ok(size);
@@ -1142,6 +1150,84 @@ impl Socket {
             .map_err(|_| Error::InvalidSocket)?
             .push_back(message);
         Ok(None)
+    }
+
+    fn try_process_xsub_subscription_send(&self, message: &Message) -> Result<bool> {
+        if self.socket_type != SocketType::Xsub {
+            return Ok(false);
+        }
+        let endpoint = {
+            let inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
+            let Some(endpoint) = &inproc.connected_endpoint else {
+                return Ok(false);
+            };
+            let Some(endpoint) = self.context.inproc_endpoint(endpoint)? else {
+                return Ok(false);
+            };
+            if endpoint.binder_type() != SocketType::Xpub {
+                return Ok(false);
+            }
+            endpoint
+        };
+
+        let first_part = !self.xsub_send_more.load(Ordering::Relaxed);
+        let should_process = first_part || self.xsub_process_subscribe.load(Ordering::Relaxed);
+        let options = self
+            .options
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .clone();
+        if first_part {
+            self.xsub_process_subscribe
+                .store(!options.only_first_subscribe, Ordering::Relaxed);
+        }
+        self.xsub_send_more.store(message.more(), Ordering::Relaxed);
+
+        if options.only_first_subscribe {
+            return Ok(false);
+        }
+        if !should_process {
+            return Ok(false);
+        }
+        let Some((&command, prefix)) = message.data().split_first() else {
+            return Ok(false);
+        };
+        match command {
+            1 => {
+                let mut subscriptions = self
+                    .subscriptions
+                    .lock()
+                    .map_err(|_| Error::InvalidSocket)?;
+                let inserted = subscriptions.insert(prefix);
+                drop(subscriptions);
+                self.xsub_process_subscribe.store(true, Ordering::Relaxed);
+                if inserted {
+                    endpoint.replay_subscription(self.id, prefix)?;
+                } else {
+                    endpoint.replay_duplicate_subscription(self.id, prefix)?;
+                }
+                Ok(true)
+            }
+            0 => {
+                let mut subscriptions = self
+                    .subscriptions
+                    .lock()
+                    .map_err(|_| Error::InvalidSocket)?;
+                let removed = subscriptions.remove(prefix);
+                drop(subscriptions);
+                self.xsub_process_subscribe.store(true, Ordering::Relaxed);
+                if removed || options.xsub_verbose_unsubscribe {
+                    endpoint.replay_unsubscription(
+                        self.id,
+                        prefix,
+                        options.xsub_verbose_unsubscribe && !removed,
+                    )?;
+                    return Ok(true);
+                }
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     fn try_recv_inproc_fast(&self) -> Result<Option<Message>> {
