@@ -1550,6 +1550,8 @@ fn native_socket_options_round_trip() {
     xsub.subscribe(b"a").unwrap();
     assert_eq!(xsub.get_option_i32(ZMQ_TOPICS_COUNT).unwrap(), 2);
     xsub.unsubscribe(b"a").unwrap();
+    assert_eq!(xsub.get_option_i32(ZMQ_TOPICS_COUNT).unwrap(), 2);
+    xsub.unsubscribe(b"a").unwrap();
     assert_eq!(xsub.get_option_i32(ZMQ_TOPICS_COUNT).unwrap(), 1);
 
     assert_eq!(socket.get_option_i32(ZMQ_NORM_MODE).unwrap(), ZMQ_NORM_CC);

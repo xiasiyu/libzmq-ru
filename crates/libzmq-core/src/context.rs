@@ -133,6 +133,8 @@ pub(crate) struct InprocEndpoint {
     binder_welcome: WelcomeMessage,
     binder_xpub_policy: XpubSubscriptionPolicy,
     xpub_peer_topics: Mutex<HashMap<Vec<u8>, HashSet<usize>>>,
+    xpub_manual_topics: Mutex<HashMap<Vec<u8>, HashSet<usize>>>,
+    xpub_last_peer: Mutex<Option<usize>>,
     peers: Mutex<Vec<InprocPeer>>,
     next_peer: AtomicUsize,
 }
@@ -160,6 +162,8 @@ impl InprocEndpoint {
             binder_welcome,
             binder_xpub_policy,
             xpub_peer_topics: Mutex::new(HashMap::new()),
+            xpub_manual_topics: Mutex::new(HashMap::new()),
+            xpub_last_peer: Mutex::new(None),
             peers: Mutex::new(Vec::new()),
             next_peer: AtomicUsize::new(0),
         }
@@ -205,9 +209,44 @@ impl InprocEndpoint {
 
     pub(crate) fn remove_peer(&self, peer_id: usize) -> Result<bool> {
         let mut peers = self.peers.lock().map_err(|_| Error::InvalidSocket)?;
+        let removed_peer = peers.iter().find(|peer| peer.id == peer_id).cloned();
         let previous_len = peers.len();
         peers.retain(|peer| peer.id != peer_id);
-        Ok(peers.len() != previous_len)
+        let removed = peers.len() != previous_len;
+        drop(peers);
+        if let Some(peer) = removed_peer.filter(|peer| peer.socket_type == SocketType::Xsub) {
+            self.remove_xsub_peer_subscriptions(&peer)?;
+        }
+        Ok(removed)
+    }
+
+    fn remove_xsub_peer_subscriptions(&self, peer: &InprocPeer) -> Result<()> {
+        if self.binder_type != SocketType::Xpub {
+            return Ok(());
+        }
+        let prefixes: Vec<Vec<u8>> = peer
+            .subscriptions
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .iter_prefixes()
+            .map(ToOwned::to_owned)
+            .collect();
+        for prefix in &prefixes {
+            self.replay_unsubscription(peer.id, prefix, false)?;
+        }
+        let mut manual_topics = self
+            .xpub_manual_topics
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?;
+        for prefix in prefixes {
+            if let Some(peers) = manual_topics.get_mut(&prefix) {
+                peers.remove(&peer.id);
+                if peers.is_empty() {
+                    manual_topics.remove(&prefix);
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn first_peer(&self) -> Result<Option<MessageQueue>> {
@@ -251,13 +290,87 @@ impl InprocEndpoint {
 
     pub(crate) fn matching_peers(&self, message: &Message) -> Result<Vec<MessageQueue>> {
         let peers = self.peers.lock().map_err(|_| Error::InvalidSocket)?;
+        let manual_xpub = self.binder_type == SocketType::Xpub
+            && self
+                .binder_xpub_policy
+                .lock()
+                .map_err(|_| Error::InvalidSocket)?
+                .manual;
+        let manual_matches = if manual_xpub {
+            Some(self.manual_matching_peer_ids(message)?)
+        } else {
+            None
+        };
         let mut outboxes = Vec::new();
         for peer in peers.iter() {
-            if socket_type_accepts_message(peer.socket_type, &peer.subscriptions, message)? {
+            let accepts = if let Some(manual_matches) = &manual_matches {
+                manual_matches.contains(&peer.id)
+            } else {
+                socket_type_accepts_message(peer.socket_type, &peer.subscriptions, message)?
+            };
+            if accepts {
                 outboxes.push(Arc::clone(&peer.inbox));
             }
         }
         Ok(outboxes)
+    }
+
+    fn manual_matching_peer_ids(&self, message: &Message) -> Result<HashSet<usize>> {
+        let topics = self
+            .xpub_manual_topics
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?;
+        let mut ids = HashSet::new();
+        for (prefix, peers) in topics.iter() {
+            if prefix.len() <= message.len() && message.data().starts_with(prefix) {
+                ids.extend(peers.iter().copied());
+            }
+        }
+        Ok(ids)
+    }
+
+    pub(crate) fn manual_subscribe_last_peer(&self, prefix: &[u8]) -> Result<()> {
+        if self.binder_type != SocketType::Xpub {
+            return Err(Error::NotSupported);
+        }
+        let Some(peer_id) = *self
+            .xpub_last_peer
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+        else {
+            return Ok(());
+        };
+        self.xpub_manual_topics
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .entry(prefix.to_vec())
+            .or_default()
+            .insert(peer_id);
+        Ok(())
+    }
+
+    pub(crate) fn manual_unsubscribe_last_peer(&self, prefix: &[u8]) -> Result<()> {
+        if self.binder_type != SocketType::Xpub {
+            return Err(Error::NotSupported);
+        }
+        let Some(peer_id) = *self
+            .xpub_last_peer
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+        else {
+            return Ok(());
+        };
+        let mut topics = self
+            .xpub_manual_topics
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?;
+        if let Some(peers) = topics.get_mut(prefix) {
+            peers.remove(&peer_id);
+            if peers.is_empty() {
+                topics.remove(prefix);
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn send_owned_to_matching_peers(&self, message: Message) -> Result<usize> {
@@ -317,7 +430,14 @@ impl InprocEndpoint {
             .lock()
             .map_err(|_| Error::InvalidSocket)?;
         if duplicate_from_peer {
-            return Ok(policy.verbose_subscribe || policy.manual);
+            let notify = policy.verbose_subscribe || policy.manual;
+            if notify {
+                *self
+                    .xpub_last_peer
+                    .lock()
+                    .map_err(|_| Error::InvalidSocket)? = Some(peer_id);
+            }
+            return Ok(notify);
         }
 
         let mut topics = self
@@ -326,7 +446,14 @@ impl InprocEndpoint {
             .map_err(|_| Error::InvalidSocket)?;
         let peers = topics.entry(prefix.to_vec()).or_default();
         peers.insert(peer_id);
-        Ok(peers.len() == 1 || policy.verbose_subscribe || policy.manual)
+        let notify = peers.len() == 1 || policy.verbose_subscribe || policy.manual;
+        if notify {
+            *self
+                .xpub_last_peer
+                .lock()
+                .map_err(|_| Error::InvalidSocket)? = Some(peer_id);
+        }
+        Ok(notify)
     }
 
     pub(crate) fn replay_unsubscription(
@@ -355,6 +482,10 @@ impl InprocEndpoint {
             .lock()
             .map_err(|_| Error::InvalidSocket)?;
         if unmatched_from_peer {
+            *self
+                .xpub_last_peer
+                .lock()
+                .map_err(|_| Error::InvalidSocket)? = Some(peer_id);
             return Ok(true);
         }
 
@@ -368,9 +499,20 @@ impl InprocEndpoint {
         peers.remove(&peer_id);
         if peers.is_empty() {
             topics.remove(prefix);
+            *self
+                .xpub_last_peer
+                .lock()
+                .map_err(|_| Error::InvalidSocket)? = Some(peer_id);
             return Ok(true);
         }
-        Ok(policy.verbose_unsubscribe || policy.manual)
+        let notify = policy.verbose_unsubscribe || policy.manual;
+        if notify {
+            *self
+                .xpub_last_peer
+                .lock()
+                .map_err(|_| Error::InvalidSocket)? = Some(peer_id);
+        }
+        Ok(notify)
     }
 
     fn replay_subscription_change(&self, subscribe: bool, prefix: &[u8]) -> Result<()> {

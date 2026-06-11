@@ -145,6 +145,7 @@ struct TcpState {
     handshake_started: bool,
     peer_greeting_done: bool,
     peer_ready: bool,
+    peer_identity: Option<Vec<u8>>,
     curve_session: Option<CurveSession>,
     gssapi_session: Option<GssapiSession>,
 }
@@ -158,6 +159,7 @@ struct IpcState {
     handshake_started: bool,
     peer_greeting_done: bool,
     peer_ready: bool,
+    peer_identity: Option<Vec<u8>>,
     curve_session: Option<CurveSession>,
     gssapi_session: Option<GssapiSession>,
 }
@@ -323,6 +325,7 @@ struct MonitorState {
 struct HandshakeResult {
     peer_greeting_done: bool,
     peer_ready: bool,
+    peer_identity: Option<Vec<u8>>,
     curve_session: Option<CurveSession>,
     gssapi_session: Option<GssapiSession>,
 }
@@ -1170,6 +1173,19 @@ impl Socket {
     }
 
     pub fn subscribe(&self, prefix: &[u8]) -> Result<()> {
+        if self.socket_type == SocketType::Xpub
+            && self
+                .options
+                .lock()
+                .map_err(|_| Error::InvalidSocket)?
+                .xpub_manual
+        {
+            let inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
+            let Some(bound_endpoint) = &inproc.bound_endpoint else {
+                return Ok(());
+            };
+            return bound_endpoint.manual_subscribe_last_peer(prefix);
+        }
         if !matches!(self.socket_type, SocketType::Sub | SocketType::Xsub) {
             return Err(Error::NotSupported);
         }
@@ -1193,6 +1209,19 @@ impl Socket {
     }
 
     pub fn unsubscribe(&self, prefix: &[u8]) -> Result<()> {
+        if self.socket_type == SocketType::Xpub
+            && self
+                .options
+                .lock()
+                .map_err(|_| Error::InvalidSocket)?
+                .xpub_manual
+        {
+            let inproc = self.inproc.lock().map_err(|_| Error::InvalidSocket)?;
+            let Some(bound_endpoint) = &inproc.bound_endpoint else {
+                return Ok(());
+            };
+            return bound_endpoint.manual_unsubscribe_last_peer(prefix);
+        }
         if !matches!(self.socket_type, SocketType::Sub | SocketType::Xsub) {
             return Err(Error::NotSupported);
         }
@@ -1881,6 +1910,7 @@ impl Socket {
         tcp.handshake_started = false;
         tcp.peer_greeting_done = false;
         tcp.peer_ready = false;
+        tcp.peer_identity = None;
         tcp.curve_session = None;
         tcp.gssapi_session = None;
         self.emit_monitor_event(ZMQ_EVENT_LISTENING, 0, endpoint)?;
@@ -1900,6 +1930,7 @@ impl Socket {
         tcp.handshake_started = false;
         tcp.peer_greeting_done = false;
         tcp.peer_ready = false;
+        tcp.peer_identity = None;
         tcp.curve_session = None;
         tcp.gssapi_session = None;
         self.emit_monitor_event(ZMQ_EVENT_CLOSED, 0, endpoint)?;
@@ -1930,6 +1961,7 @@ impl Socket {
         tcp.handshake_started = false;
         tcp.peer_greeting_done = false;
         tcp.peer_ready = false;
+        tcp.peer_identity = None;
         tcp.curve_session = None;
         tcp.gssapi_session = None;
         self.emit_monitor_event(ZMQ_EVENT_CONNECTED, 0, endpoint)?;
@@ -1949,6 +1981,7 @@ impl Socket {
         tcp.handshake_started = false;
         tcp.peer_greeting_done = false;
         tcp.peer_ready = false;
+        tcp.peer_identity = None;
         tcp.curve_session = None;
         tcp.gssapi_session = None;
         self.emit_monitor_event(ZMQ_EVENT_DISCONNECTED, 0, endpoint)?;
@@ -1977,6 +2010,7 @@ impl Socket {
                         tcp.handshake_started = false;
                         tcp.peer_greeting_done = false;
                         tcp.peer_ready = false;
+                        tcp.peer_identity = None;
                         tcp.curve_session = None;
                         tcp.gssapi_session = None;
                     }
@@ -2012,22 +2046,23 @@ impl Socket {
         }
         if !tcp.handshake_started {
             let as_server = tcp.bound_endpoint.is_some();
-            let security = self
+            let options = self
                 .options
                 .lock()
                 .map_err(|_| Error::InvalidSocket)?
-                .security
                 .clone();
             let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
             let handshake = write_zmtp_handshake_tcp(
                 stream,
                 self.socket_type,
                 as_server,
-                &security,
+                &options.security,
+                &options.routing_id,
                 &self.context,
             )?;
             tcp.peer_greeting_done = handshake.peer_greeting_done;
             tcp.peer_ready = handshake.peer_ready;
+            tcp.peer_identity = handshake.peer_identity;
             tcp.curve_session = handshake.curve_session;
             tcp.gssapi_session = handshake.gssapi_session;
             tcp.handshake_started = true;
@@ -2061,22 +2096,23 @@ impl Socket {
         }
         if !tcp.handshake_started {
             let as_server = tcp.bound_endpoint.is_some();
-            let security = self
+            let options = self
                 .options
                 .lock()
                 .map_err(|_| Error::InvalidSocket)?
-                .security
                 .clone();
             let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
             let handshake = write_zmtp_handshake_tcp(
                 stream,
                 self.socket_type,
                 as_server,
-                &security,
+                &options.security,
+                &options.routing_id,
                 &self.context,
             )?;
             tcp.peer_greeting_done = handshake.peer_greeting_done;
             tcp.peer_ready = handshake.peer_ready;
+            tcp.peer_identity = handshake.peer_identity;
             tcp.curve_session = handshake.curve_session;
             tcp.gssapi_session = handshake.gssapi_session;
             tcp.handshake_started = true;
@@ -2088,7 +2124,8 @@ impl Socket {
         }
         if !tcp.peer_ready {
             let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
-            read_zmtp_peer_ready_tcp(stream)?;
+            let metadata = read_zmtp_peer_ready_tcp(stream)?;
+            tcp.peer_identity = metadata.get("Identity").map(ToOwned::to_owned);
             tcp.peer_ready = true;
         }
         loop {
@@ -2096,19 +2133,24 @@ impl Socket {
                 let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
                 let body = read_zmtp_frame_body_tcp(stream)?;
                 let session = tcp.curve_session.as_mut().ok_or(Error::InvalidSocket)?;
-                return curve_message_from_body(session, &body);
+                let mut message = curve_message_from_body(session, &body)?;
+                apply_peer_identity_metadata(&mut message, tcp.peer_identity.as_deref());
+                return Ok(message);
             }
             if tcp.gssapi_session.is_some() {
                 let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
                 let body = read_zmtp_frame_body_tcp(stream)?;
                 let session = tcp.gssapi_session.as_mut().ok_or(Error::InvalidSocket)?;
-                return gssapi_message_from_body(session, &body);
+                let mut message = gssapi_message_from_body(session, &body)?;
+                apply_peer_identity_metadata(&mut message, tcp.peer_identity.as_deref());
+                return Ok(message);
             }
             let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
             let frame = read_zmtp_frame_tcp(stream)?;
             if !frame.command_frame() {
                 let mut message = Message::from_vec(frame.body().to_vec());
                 message.set_more(frame.more());
+                apply_peer_identity_metadata(&mut message, tcp.peer_identity.as_deref());
                 return Ok(message);
             }
         }
@@ -2127,6 +2169,7 @@ impl Socket {
         ipc.handshake_started = false;
         ipc.peer_greeting_done = false;
         ipc.peer_ready = false;
+        ipc.peer_identity = None;
         ipc.curve_session = None;
         ipc.gssapi_session = None;
         self.emit_monitor_event(ZMQ_EVENT_LISTENING, 0, endpoint)?;
@@ -2146,6 +2189,7 @@ impl Socket {
         ipc.handshake_started = false;
         ipc.peer_greeting_done = false;
         ipc.peer_ready = false;
+        ipc.peer_identity = None;
         ipc.curve_session = None;
         ipc.gssapi_session = None;
         let _ = std::fs::remove_file(parsed.path());
@@ -2166,6 +2210,7 @@ impl Socket {
         ipc.handshake_started = false;
         ipc.peer_greeting_done = false;
         ipc.peer_ready = false;
+        ipc.peer_identity = None;
         ipc.curve_session = None;
         ipc.gssapi_session = None;
         self.emit_monitor_event(ZMQ_EVENT_CONNECTED, 0, endpoint)?;
@@ -2203,6 +2248,8 @@ impl Socket {
                 | SocketType::Pull
                 | SocketType::Req
                 | SocketType::Rep
+                | SocketType::Dealer
+                | SocketType::Router
                 | SocketType::Server
                 | SocketType::Client
                 | SocketType::Peer
@@ -2222,6 +2269,12 @@ impl Socket {
                 Ok(stream) => {
                     configure_ipc_stream(&stream)?;
                     ipc.stream = Some(stream);
+                    ipc.handshake_started = false;
+                    ipc.peer_greeting_done = false;
+                    ipc.peer_ready = false;
+                    ipc.peer_identity = None;
+                    ipc.curve_session = None;
+                    ipc.gssapi_session = None;
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     return Err(Error::Again)
@@ -2241,22 +2294,23 @@ impl Socket {
         }
         if !ipc.handshake_started {
             let as_server = ipc.bound_endpoint.is_some();
-            let security = self
+            let options = self
                 .options
                 .lock()
                 .map_err(|_| Error::InvalidSocket)?
-                .security
                 .clone();
             let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
             let handshake = write_zmtp_handshake_ipc(
                 stream,
                 self.socket_type,
                 as_server,
-                &security,
+                &options.security,
+                &options.routing_id,
                 &self.context,
             )?;
             ipc.peer_greeting_done = handshake.peer_greeting_done;
             ipc.peer_ready = handshake.peer_ready;
+            ipc.peer_identity = handshake.peer_identity;
             ipc.curve_session = handshake.curve_session;
             ipc.gssapi_session = handshake.gssapi_session;
             ipc.handshake_started = true;
@@ -2290,22 +2344,23 @@ impl Socket {
         }
         if !ipc.handshake_started {
             let as_server = ipc.bound_endpoint.is_some();
-            let security = self
+            let options = self
                 .options
                 .lock()
                 .map_err(|_| Error::InvalidSocket)?
-                .security
                 .clone();
             let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
             let handshake = write_zmtp_handshake_ipc(
                 stream,
                 self.socket_type,
                 as_server,
-                &security,
+                &options.security,
+                &options.routing_id,
                 &self.context,
             )?;
             ipc.peer_greeting_done = handshake.peer_greeting_done;
             ipc.peer_ready = handshake.peer_ready;
+            ipc.peer_identity = handshake.peer_identity;
             ipc.curve_session = handshake.curve_session;
             ipc.gssapi_session = handshake.gssapi_session;
             ipc.handshake_started = true;
@@ -2317,7 +2372,8 @@ impl Socket {
         }
         if !ipc.peer_ready {
             let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
-            read_zmtp_peer_ready_ipc(stream)?;
+            let metadata = read_zmtp_peer_ready_ipc(stream)?;
+            ipc.peer_identity = metadata.get("Identity").map(ToOwned::to_owned);
             ipc.peer_ready = true;
         }
         loop {
@@ -2325,19 +2381,24 @@ impl Socket {
                 let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
                 let body = read_zmtp_frame_body_ipc(stream)?;
                 let session = ipc.curve_session.as_mut().ok_or(Error::InvalidSocket)?;
-                return curve_message_from_body(session, &body);
+                let mut message = curve_message_from_body(session, &body)?;
+                apply_peer_identity_metadata(&mut message, ipc.peer_identity.as_deref());
+                return Ok(message);
             }
             if ipc.gssapi_session.is_some() {
                 let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
                 let body = read_zmtp_frame_body_ipc(stream)?;
                 let session = ipc.gssapi_session.as_mut().ok_or(Error::InvalidSocket)?;
-                return gssapi_message_from_body(session, &body);
+                let mut message = gssapi_message_from_body(session, &body)?;
+                apply_peer_identity_metadata(&mut message, ipc.peer_identity.as_deref());
+                return Ok(message);
             }
             let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
             let frame = read_zmtp_frame_ipc(stream)?;
             if !frame.command_frame() {
                 let mut message = Message::from_vec(frame.body().to_vec());
                 message.set_more(frame.more());
+                apply_peer_identity_metadata(&mut message, ipc.peer_identity.as_deref());
                 return Ok(message);
             }
         }
@@ -3556,6 +3617,7 @@ fn write_zmtp_handshake_tcp(
     socket_type: SocketType,
     as_server: bool,
     security: &SecurityOptions,
+    routing_id: &[u8],
     context: &ContextShared,
 ) -> Result<HandshakeResult> {
     let greeting = ZmtpGreeting::new(security.mechanism_name(), as_server);
@@ -3574,28 +3636,54 @@ fn write_zmtp_handshake_tcp(
         read_zmtp_greeting_tail_tcp(stream)?;
     }
     let mut peer_ready = false;
+    let mut peer_identity = None;
     let mut curve_session = None;
     let mut gssapi_session = None;
     match security.mechanism() {
         ZMQ_PLAIN => {
-            peer_ready =
-                write_plain_handshake_tcp(stream, socket_type, as_server, security, context)?;
+            let handshake = write_plain_handshake_tcp(
+                stream,
+                socket_type,
+                as_server,
+                security,
+                routing_id,
+                context,
+            )?;
+            peer_ready = handshake.peer_ready;
+            peer_identity = handshake.peer_identity;
         }
         ZMQ_CURVE => {
-            let handshake =
-                write_curve_handshake_tcp(stream, socket_type, as_server, security, context)?;
+            let handshake = write_curve_handshake_tcp(
+                stream,
+                socket_type,
+                as_server,
+                security,
+                routing_id,
+                context,
+            )?;
             peer_ready = handshake.peer_ready;
+            peer_identity = handshake.peer_identity;
             curve_session = handshake.curve_session;
         }
         ZMQ_GSSAPI => {
-            let handshake =
-                write_gssapi_handshake_tcp(stream, socket_type, as_server, security, context)?;
+            let handshake = write_gssapi_handshake_tcp(
+                stream,
+                socket_type,
+                as_server,
+                security,
+                routing_id,
+                context,
+            )?;
             peer_ready = handshake.peer_ready;
+            peer_identity = handshake.peer_identity;
             gssapi_session = handshake.gssapi_session;
         }
         _ => {
             stream
-                .write_all(&ZmtpFrame::command(ready_command_body(socket_type)).encode_v3())
+                .write_all(
+                    &ZmtpFrame::command(ready_command_body_with_identity(socket_type, routing_id))
+                        .encode_v3(),
+                )
                 .map_err(map_io_error)?;
         }
     }
@@ -3607,17 +3695,17 @@ fn write_zmtp_handshake_tcp(
     Ok(HandshakeResult {
         peer_greeting_done: peer_prefix_done,
         peer_ready,
+        peer_identity,
         curve_session,
         gssapi_session,
     })
 }
 
-fn read_zmtp_peer_ready_tcp(stream: &mut TcpStreamHandle) -> Result<()> {
+fn read_zmtp_peer_ready_tcp(stream: &mut TcpStreamHandle) -> Result<ZmtpMetadata> {
     loop {
         let frame = read_zmtp_frame_tcp(stream)?;
         if frame.command_frame() {
-            let _metadata = ZmtpMetadata::decode_ready(frame.body())?;
-            return Ok(());
+            return ZmtpMetadata::decode_ready(frame.body());
         }
     }
 }
@@ -3687,6 +3775,7 @@ fn write_zmtp_handshake_ipc(
     socket_type: SocketType,
     as_server: bool,
     security: &SecurityOptions,
+    routing_id: &[u8],
     context: &ContextShared,
 ) -> Result<HandshakeResult> {
     let greeting = ZmtpGreeting::new(security.mechanism_name(), as_server);
@@ -3705,28 +3794,54 @@ fn write_zmtp_handshake_ipc(
         read_zmtp_greeting_tail_ipc(stream)?;
     }
     let mut peer_ready = false;
+    let mut peer_identity = None;
     let mut curve_session = None;
     let mut gssapi_session = None;
     match security.mechanism() {
         ZMQ_PLAIN => {
-            peer_ready =
-                write_plain_handshake_ipc(stream, socket_type, as_server, security, context)?;
+            let handshake = write_plain_handshake_ipc(
+                stream,
+                socket_type,
+                as_server,
+                security,
+                routing_id,
+                context,
+            )?;
+            peer_ready = handshake.peer_ready;
+            peer_identity = handshake.peer_identity;
         }
         ZMQ_CURVE => {
-            let handshake =
-                write_curve_handshake_ipc(stream, socket_type, as_server, security, context)?;
+            let handshake = write_curve_handshake_ipc(
+                stream,
+                socket_type,
+                as_server,
+                security,
+                routing_id,
+                context,
+            )?;
             peer_ready = handshake.peer_ready;
+            peer_identity = handshake.peer_identity;
             curve_session = handshake.curve_session;
         }
         ZMQ_GSSAPI => {
-            let handshake =
-                write_gssapi_handshake_ipc(stream, socket_type, as_server, security, context)?;
+            let handshake = write_gssapi_handshake_ipc(
+                stream,
+                socket_type,
+                as_server,
+                security,
+                routing_id,
+                context,
+            )?;
             peer_ready = handshake.peer_ready;
+            peer_identity = handshake.peer_identity;
             gssapi_session = handshake.gssapi_session;
         }
         _ => {
             stream
-                .write_all(&ZmtpFrame::command(ready_command_body(socket_type)).encode_v3())
+                .write_all(
+                    &ZmtpFrame::command(ready_command_body_with_identity(socket_type, routing_id))
+                        .encode_v3(),
+                )
                 .map_err(map_io_error)?;
         }
     }
@@ -3738,17 +3853,17 @@ fn write_zmtp_handshake_ipc(
     Ok(HandshakeResult {
         peer_greeting_done: peer_prefix_done,
         peer_ready,
+        peer_identity,
         curve_session,
         gssapi_session,
     })
 }
 
-fn read_zmtp_peer_ready_ipc(stream: &mut IpcStreamHandle) -> Result<()> {
+fn read_zmtp_peer_ready_ipc(stream: &mut IpcStreamHandle) -> Result<ZmtpMetadata> {
     loop {
         let frame = read_zmtp_frame_ipc(stream)?;
         if frame.command_frame() {
-            let _metadata = ZmtpMetadata::decode_ready(frame.body())?;
-            return Ok(());
+            return ZmtpMetadata::decode_ready(frame.body());
         }
     }
 }
@@ -3850,28 +3965,46 @@ fn write_plain_handshake_tcp(
     socket_type: SocketType,
     as_server: bool,
     security: &SecurityOptions,
+    routing_id: &[u8],
     context: &ContextShared,
-) -> Result<bool> {
+) -> Result<HandshakeResult> {
     if as_server {
         let credentials = parse_plain_hello(&read_zmtp_frame_tcp(stream)?)?;
         authorize_plain(context, security, &credentials)?;
         stream
             .write_all(&ZmtpFrame::command(command_body("WELCOME", [])).encode_v3())
             .map_err(map_io_error)?;
-        expect_command(&read_zmtp_frame_tcp(stream)?, "INITIATE")?;
+        let peer_metadata = parse_plain_initiate(&read_zmtp_frame_tcp(stream)?)?;
         stream
-            .write_all(&ZmtpFrame::command(ready_command_body(socket_type)).encode_v3())
+            .write_all(
+                &ZmtpFrame::command(ready_command_body_with_identity(socket_type, routing_id))
+                    .encode_v3(),
+            )
             .map_err(map_io_error)?;
-        Ok(true)
+        Ok(HandshakeResult {
+            peer_greeting_done: false,
+            peer_ready: true,
+            peer_identity: peer_metadata.get("Identity").map(ToOwned::to_owned),
+            curve_session: None,
+            gssapi_session: None,
+        })
     } else {
         stream
             .write_all(&ZmtpFrame::command(plain_hello_body(security)).encode_v3())
             .map_err(map_io_error)?;
         expect_command(&read_zmtp_frame_tcp(stream)?, "WELCOME")?;
         stream
-            .write_all(&ZmtpFrame::command(plain_initiate_body(socket_type)).encode_v3())
+            .write_all(
+                &ZmtpFrame::command(plain_initiate_body(socket_type, routing_id)).encode_v3(),
+            )
             .map_err(map_io_error)?;
-        Ok(false)
+        Ok(HandshakeResult {
+            peer_greeting_done: false,
+            peer_ready: false,
+            peer_identity: None,
+            curve_session: None,
+            gssapi_session: None,
+        })
     }
 }
 
@@ -3880,28 +4013,46 @@ fn write_plain_handshake_ipc(
     socket_type: SocketType,
     as_server: bool,
     security: &SecurityOptions,
+    routing_id: &[u8],
     context: &ContextShared,
-) -> Result<bool> {
+) -> Result<HandshakeResult> {
     if as_server {
         let credentials = parse_plain_hello(&read_zmtp_frame_ipc(stream)?)?;
         authorize_plain(context, security, &credentials)?;
         stream
             .write_all(&ZmtpFrame::command(command_body("WELCOME", [])).encode_v3())
             .map_err(map_io_error)?;
-        expect_command(&read_zmtp_frame_ipc(stream)?, "INITIATE")?;
+        let peer_metadata = parse_plain_initiate(&read_zmtp_frame_ipc(stream)?)?;
         stream
-            .write_all(&ZmtpFrame::command(ready_command_body(socket_type)).encode_v3())
+            .write_all(
+                &ZmtpFrame::command(ready_command_body_with_identity(socket_type, routing_id))
+                    .encode_v3(),
+            )
             .map_err(map_io_error)?;
-        Ok(true)
+        Ok(HandshakeResult {
+            peer_greeting_done: false,
+            peer_ready: true,
+            peer_identity: peer_metadata.get("Identity").map(ToOwned::to_owned),
+            curve_session: None,
+            gssapi_session: None,
+        })
     } else {
         stream
             .write_all(&ZmtpFrame::command(plain_hello_body(security)).encode_v3())
             .map_err(map_io_error)?;
         expect_command(&read_zmtp_frame_ipc(stream)?, "WELCOME")?;
         stream
-            .write_all(&ZmtpFrame::command(plain_initiate_body(socket_type)).encode_v3())
+            .write_all(
+                &ZmtpFrame::command(plain_initiate_body(socket_type, routing_id)).encode_v3(),
+            )
             .map_err(map_io_error)?;
-        Ok(false)
+        Ok(HandshakeResult {
+            peer_greeting_done: false,
+            peer_ready: false,
+            peer_identity: None,
+            curve_session: None,
+            gssapi_session: None,
+        })
     }
 }
 
@@ -3970,6 +4121,7 @@ fn write_curve_handshake_tcp(
     socket_type: SocketType,
     as_server: bool,
     security: &SecurityOptions,
+    routing_id: &[u8],
     context: &ContextShared,
 ) -> Result<HandshakeResult> {
     if as_server {
@@ -3986,12 +4138,14 @@ fn write_curve_handshake_tcp(
         let mut session = hello.session();
         stream
             .write_all(
-                &ZmtpFrame::command(curve_ready_body(socket_type, &mut session)?).encode_v3(),
+                &ZmtpFrame::command(curve_ready_body(socket_type, routing_id, &mut session)?)
+                    .encode_v3(),
             )
             .map_err(map_io_error)?;
         Ok(HandshakeResult {
             peer_greeting_done: false,
             peer_ready: true,
+            peer_identity: initiate.metadata.get("Identity").map(ToOwned::to_owned),
             curve_session: Some(session),
             gssapi_session: None,
         })
@@ -4002,12 +4156,15 @@ fn write_curve_handshake_tcp(
             .map_err(map_io_error)?;
         client.process_welcome(&read_zmtp_frame_tcp(stream)?)?;
         stream
-            .write_all(&ZmtpFrame::command(client.initiate_body(socket_type)?).encode_v3())
+            .write_all(
+                &ZmtpFrame::command(client.initiate_body(socket_type, routing_id)?).encode_v3(),
+            )
             .map_err(map_io_error)?;
-        client.process_ready(&read_zmtp_frame_tcp(stream)?)?;
+        let peer_metadata = client.process_ready(&read_zmtp_frame_tcp(stream)?)?;
         Ok(HandshakeResult {
             peer_greeting_done: false,
             peer_ready: true,
+            peer_identity: peer_metadata.get("Identity").map(ToOwned::to_owned),
             curve_session: Some(client.session()?),
             gssapi_session: None,
         })
@@ -4019,6 +4176,7 @@ fn write_curve_handshake_ipc(
     socket_type: SocketType,
     as_server: bool,
     security: &SecurityOptions,
+    routing_id: &[u8],
     context: &ContextShared,
 ) -> Result<HandshakeResult> {
     if as_server {
@@ -4035,12 +4193,14 @@ fn write_curve_handshake_ipc(
         let mut session = hello.session();
         stream
             .write_all(
-                &ZmtpFrame::command(curve_ready_body(socket_type, &mut session)?).encode_v3(),
+                &ZmtpFrame::command(curve_ready_body(socket_type, routing_id, &mut session)?)
+                    .encode_v3(),
             )
             .map_err(map_io_error)?;
         Ok(HandshakeResult {
             peer_greeting_done: false,
             peer_ready: true,
+            peer_identity: initiate.metadata.get("Identity").map(ToOwned::to_owned),
             curve_session: Some(session),
             gssapi_session: None,
         })
@@ -4051,12 +4211,15 @@ fn write_curve_handshake_ipc(
             .map_err(map_io_error)?;
         client.process_welcome(&read_zmtp_frame_ipc(stream)?)?;
         stream
-            .write_all(&ZmtpFrame::command(client.initiate_body(socket_type)?).encode_v3())
+            .write_all(
+                &ZmtpFrame::command(client.initiate_body(socket_type, routing_id)?).encode_v3(),
+            )
             .map_err(map_io_error)?;
-        client.process_ready(&read_zmtp_frame_ipc(stream)?)?;
+        let peer_metadata = client.process_ready(&read_zmtp_frame_ipc(stream)?)?;
         Ok(HandshakeResult {
             peer_greeting_done: false,
             peer_ready: true,
+            peer_identity: peer_metadata.get("Identity").map(ToOwned::to_owned),
             curve_session: Some(client.session()?),
             gssapi_session: None,
         })
@@ -4138,6 +4301,7 @@ struct CurveServerHandshake {
 #[derive(Debug)]
 struct CurveInitiate {
     client_public_key: [u8; 32],
+    metadata: ZmtpMetadata,
 }
 
 impl CurveClientHandshake {
@@ -4205,7 +4369,7 @@ impl CurveClientHandshake {
         Ok(())
     }
 
-    fn initiate_body(&mut self, socket_type: SocketType) -> Result<Vec<u8>> {
+    fn initiate_body(&mut self, socket_type: SocketType, identity: &[u8]) -> Result<Vec<u8>> {
         let server_transient_public = self.server_transient_public.ok_or(Error::InvalidArgument)?;
         let cookie = self.cookie.ok_or(Error::InvalidArgument)?;
         let mut vouch_nonce_tail = [0u8; 16];
@@ -4224,11 +4388,12 @@ impl CurveClientHandshake {
             return Err(Error::InvalidArgument);
         }
 
-        let mut plaintext = Vec::with_capacity(128 + socket_type_metadata(socket_type).len());
+        let metadata = socket_type_metadata_with_identity(socket_type, identity);
+        let mut plaintext = Vec::with_capacity(128 + metadata.len());
         plaintext.extend_from_slice(&self.public_key);
         plaintext.extend_from_slice(&vouch_nonce_tail);
         plaintext.extend_from_slice(&vouch_box);
-        plaintext.extend_from_slice(&socket_type_metadata(socket_type));
+        plaintext.extend_from_slice(&metadata);
 
         let nonce_number = self.next_send_nonce();
         let nonce = curve_nonce(b"CurveZMQINITIATE", nonce_number);
@@ -4245,7 +4410,7 @@ impl CurveClientHandshake {
         Ok(command_body("INITIATE", tail))
     }
 
-    fn process_ready(&mut self, frame: &ZmtpFrame) -> Result<()> {
+    fn process_ready(&mut self, frame: &ZmtpFrame) -> Result<ZmtpMetadata> {
         let tail = command_tail(frame, "READY")?;
         if tail.len() < 24 {
             return Err(Error::InvalidArgument);
@@ -4263,8 +4428,7 @@ impl CurveClientHandshake {
             &server_transient_public,
             &self.transient_secret,
         )?;
-        let _ = ZmtpMetadata::decode_properties(&plaintext)?;
-        Ok(())
+        ZmtpMetadata::decode_properties(&plaintext)
     }
 
     fn session(self) -> Result<CurveSession> {
@@ -4437,15 +4601,22 @@ fn parse_curve_initiate(
     {
         return Err(Error::InvalidArgument);
     }
-    let _ = ZmtpMetadata::decode_properties(&plaintext[128..])?;
-    Ok(CurveInitiate { client_public_key })
+    let metadata = ZmtpMetadata::decode_properties(&plaintext[128..])?;
+    Ok(CurveInitiate {
+        client_public_key,
+        metadata,
+    })
 }
 
-fn curve_ready_body(socket_type: SocketType, session: &mut CurveSession) -> Result<Vec<u8>> {
+fn curve_ready_body(
+    socket_type: SocketType,
+    identity: &[u8],
+    session: &mut CurveSession,
+) -> Result<Vec<u8>> {
     let nonce_number = session.next_send_nonce();
     let nonce = curve_nonce(b"CurveZMQREADY---", nonce_number);
     let ciphertext = curve_box_encrypt(
-        &socket_type_metadata(socket_type),
+        &socket_type_metadata_with_identity(socket_type, identity),
         &nonce,
         &session.peer_transient_public,
         &session.local_transient_secret,
@@ -4720,9 +4891,17 @@ fn fill_random(bytes: &mut [u8]) -> Result<()> {
     getrandom::getrandom(bytes).map_err(|_| Error::InvalidSocket)
 }
 
-fn socket_type_metadata(socket_type: SocketType) -> Vec<u8> {
+fn socket_type_metadata_with_identity(socket_type: SocketType, identity: &[u8]) -> Vec<u8> {
     let socket_type = socket_type_name(socket_type);
-    ZmtpMetadata::new([("Socket-Type", socket_type.as_bytes().to_vec())]).encode_properties()
+    if identity.is_empty() {
+        ZmtpMetadata::new([("Socket-Type", socket_type.as_bytes().to_vec())]).encode_properties()
+    } else {
+        ZmtpMetadata::new([
+            ("Socket-Type", socket_type.as_bytes().to_vec()),
+            ("Identity", identity.to_vec()),
+        ])
+        .encode_properties()
+    }
 }
 
 fn socket_type_name(socket_type: SocketType) -> &'static str {
@@ -4754,16 +4933,31 @@ fn write_gssapi_handshake_tcp(
     socket_type: SocketType,
     as_server: bool,
     security: &SecurityOptions,
+    routing_id: &[u8],
     context: &ContextShared,
 ) -> Result<HandshakeResult> {
     #[cfg(feature = "gssapi")]
     {
-        write_real_gssapi_handshake(stream, socket_type, as_server, security, context)
+        write_real_gssapi_handshake(
+            stream,
+            socket_type,
+            as_server,
+            security,
+            routing_id,
+            context,
+        )
     }
 
     #[cfg(not(feature = "gssapi"))]
     {
-        write_placeholder_gssapi_handshake(stream, socket_type, as_server, security, context)
+        write_placeholder_gssapi_handshake(
+            stream,
+            socket_type,
+            as_server,
+            security,
+            routing_id,
+            context,
+        )
     }
 }
 
@@ -4773,28 +4967,33 @@ fn write_placeholder_gssapi_handshake(
     socket_type: SocketType,
     as_server: bool,
     security: &SecurityOptions,
+    routing_id: &[u8],
     context: &ContextShared,
 ) -> Result<HandshakeResult> {
+    let peer_metadata;
     if as_server {
         let credentials = parse_gssapi_initiate(&stream.read_zmtp_frame()?)?;
         authorize_gssapi(context, security, &credentials)?;
         stream.write_zmtp_frame_bytes(
-            &ZmtpFrame::command(ready_command_body(socket_type)).encode_v3(),
+            &ZmtpFrame::command(ready_command_body_with_identity(socket_type, routing_id))
+                .encode_v3(),
         )?;
-        expect_command(&stream.read_zmtp_frame()?, "READY")?;
+        peer_metadata = parse_ready_metadata(&stream.read_zmtp_frame()?)?;
     } else {
         stream.write_zmtp_frame_bytes(
             &ZmtpFrame::command(gssapi_placeholder_initiate_body(security)).encode_v3(),
         )?;
-        expect_command(&stream.read_zmtp_frame()?, "READY")?;
+        peer_metadata = parse_ready_metadata(&stream.read_zmtp_frame()?)?;
         stream.write_zmtp_frame_bytes(
-            &ZmtpFrame::command(ready_command_body(socket_type)).encode_v3(),
+            &ZmtpFrame::command(ready_command_body_with_identity(socket_type, routing_id))
+                .encode_v3(),
         )?;
     }
 
     Ok(HandshakeResult {
         peer_greeting_done: false,
         peer_ready: true,
+        peer_identity: peer_metadata.get("Identity").map(ToOwned::to_owned),
         curve_session: None,
         gssapi_session: None,
     })
@@ -4805,16 +5004,31 @@ fn write_gssapi_handshake_ipc(
     socket_type: SocketType,
     as_server: bool,
     security: &SecurityOptions,
+    routing_id: &[u8],
     context: &ContextShared,
 ) -> Result<HandshakeResult> {
     #[cfg(feature = "gssapi")]
     {
-        write_real_gssapi_handshake(stream, socket_type, as_server, security, context)
+        write_real_gssapi_handshake(
+            stream,
+            socket_type,
+            as_server,
+            security,
+            routing_id,
+            context,
+        )
     }
 
     #[cfg(not(feature = "gssapi"))]
     {
-        write_placeholder_gssapi_handshake(stream, socket_type, as_server, security, context)
+        write_placeholder_gssapi_handshake(
+            stream,
+            socket_type,
+            as_server,
+            security,
+            routing_id,
+            context,
+        )
     }
 }
 
@@ -4824,6 +5038,7 @@ fn write_real_gssapi_handshake(
     socket_type: SocketType,
     as_server: bool,
     security: &SecurityOptions,
+    routing_id: &[u8],
     context: &ContextShared,
 ) -> Result<HandshakeResult> {
     if as_server {
@@ -4866,13 +5081,20 @@ fn write_real_gssapi_handshake(
             context: GssapiContext::Server(server),
         };
         stream.write_zmtp_frame_bytes(
-            &ZmtpFrame::command(gssapi_ready_body(socket_type, &mut session, security)?)
-                .encode_v3(),
+            &ZmtpFrame::command(gssapi_ready_body(
+                socket_type,
+                routing_id,
+                &mut session,
+                security,
+            )?)
+            .encode_v3(),
         )?;
-        gssapi_expect_ready(&stream.read_zmtp_frame()?, &mut session, security)?;
+        let peer_metadata =
+            gssapi_expect_ready(&stream.read_zmtp_frame()?, &mut session, security)?;
         Ok(HandshakeResult {
             peer_greeting_done: false,
             peer_ready: true,
+            peer_identity: peer_metadata.get("Identity").map(ToOwned::to_owned),
             curve_session: None,
             gssapi_session: (!security.gssapi_plaintext).then_some(session),
         })
@@ -4923,14 +5145,21 @@ fn write_real_gssapi_handshake(
         let mut session = GssapiSession {
             context: GssapiContext::Client(client),
         };
-        gssapi_expect_ready(&stream.read_zmtp_frame()?, &mut session, security)?;
+        let peer_metadata =
+            gssapi_expect_ready(&stream.read_zmtp_frame()?, &mut session, security)?;
         stream.write_zmtp_frame_bytes(
-            &ZmtpFrame::command(gssapi_ready_body(socket_type, &mut session, security)?)
-                .encode_v3(),
+            &ZmtpFrame::command(gssapi_ready_body(
+                socket_type,
+                routing_id,
+                &mut session,
+                security,
+            )?)
+            .encode_v3(),
         )?;
         Ok(HandshakeResult {
             peer_greeting_done: false,
             peer_ready: true,
+            peer_identity: peer_metadata.get("Identity").map(ToOwned::to_owned),
             curve_session: None,
             gssapi_session: (!security.gssapi_plaintext).then_some(session),
         })
@@ -5010,10 +5239,11 @@ fn parse_gssapi_initiate_token(frame: &ZmtpFrame) -> Result<Vec<u8>> {
 #[cfg(feature = "gssapi")]
 fn gssapi_ready_body(
     socket_type: SocketType,
+    identity: &[u8],
     session: &mut GssapiSession,
     security: &SecurityOptions,
 ) -> Result<Vec<u8>> {
-    let ready = ready_command_body(socket_type);
+    let ready = ready_command_body_with_identity(socket_type, identity);
     if security.gssapi_plaintext {
         Ok(ready)
     } else {
@@ -5026,15 +5256,15 @@ fn gssapi_expect_ready(
     frame: &ZmtpFrame,
     session: &mut GssapiSession,
     security: &SecurityOptions,
-) -> Result<()> {
+) -> Result<ZmtpMetadata> {
     if security.gssapi_plaintext {
-        return expect_command(frame, "READY");
+        return parse_ready_metadata(frame);
     }
     let (flags, plaintext) = gssapi_unwrap_body(session, frame.body())?;
     if flags & 0x02 == 0 {
         return Err(Error::InvalidArgument);
     }
-    command_tail_body(&plaintext, "READY").map(|_| ())
+    ZmtpMetadata::decode_properties(command_tail_body(&plaintext, "READY")?)
 }
 
 #[cfg(feature = "gssapi")]
@@ -5213,8 +5443,12 @@ fn parse_plain_hello(frame: &ZmtpFrame) -> Result<PlainCredentials> {
     })
 }
 
-fn plain_initiate_body(socket_type: SocketType) -> Vec<u8> {
-    let ready = ready_command_body(socket_type);
+fn parse_plain_initiate(frame: &ZmtpFrame) -> Result<ZmtpMetadata> {
+    ZmtpMetadata::decode_properties(command_tail(frame, "INITIATE")?)
+}
+
+fn plain_initiate_body(socket_type: SocketType, identity: &[u8]) -> Vec<u8> {
+    let ready = ready_command_body_with_identity(socket_type, identity);
     command_body("INITIATE", ready.into_iter().skip(6))
 }
 
@@ -5228,6 +5462,10 @@ fn command_body(name: &str, tail: impl IntoIterator<Item = u8>) -> Vec<u8> {
 
 fn expect_command(frame: &ZmtpFrame, expected: &str) -> Result<()> {
     command_tail(frame, expected).map(|_| ())
+}
+
+fn parse_ready_metadata(frame: &ZmtpFrame) -> Result<ZmtpMetadata> {
+    ZmtpMetadata::decode_properties(command_tail(frame, "READY")?)
 }
 
 fn command_tail<'a>(frame: &'a ZmtpFrame, expected: &str) -> Result<&'a [u8]> {
@@ -5248,9 +5486,33 @@ fn command_tail_body<'a>(body: &'a [u8], expected: &str) -> Result<&'a [u8]> {
     Ok(&body[1 + name_len..])
 }
 
-fn ready_command_body(socket_type: SocketType) -> Vec<u8> {
+fn ready_command_body_with_identity(socket_type: SocketType, identity: &[u8]) -> Vec<u8> {
     let socket_type = socket_type_name(socket_type);
-    ZmtpMetadata::new([("Socket-Type", socket_type.as_bytes().to_vec())]).encode_ready()
+    if identity.is_empty() {
+        ZmtpMetadata::new([("Socket-Type", socket_type.as_bytes().to_vec())]).encode_ready()
+    } else {
+        ZmtpMetadata::new([
+            ("Socket-Type", socket_type.as_bytes().to_vec()),
+            ("Identity", identity.to_vec()),
+        ])
+        .encode_ready()
+    }
+}
+
+fn apply_peer_identity_metadata(message: &mut Message, peer_identity: Option<&[u8]>) {
+    let Some(identity) = peer_identity else {
+        return;
+    };
+    let Ok(identity) = std::str::from_utf8(identity) else {
+        return;
+    };
+    if identity.as_bytes().contains(&0) {
+        return;
+    }
+    let _ = message.set_metadata("Routing-Id", identity);
+    if let Ok(routing_id) = identity.parse::<u32>() {
+        message.set_routing_id(routing_id);
+    }
 }
 
 fn is_reconnectable_tcp_error(error: &io::Error) -> bool {
@@ -5296,5 +5558,18 @@ fn map_io_error(error: io::Error) -> Error {
         io::ErrorKind::InvalidInput => Error::InvalidArgument,
         io::ErrorKind::Unsupported => Error::NotSupported,
         _ => Error::InvalidSocket,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_command_body_includes_identity_metadata() {
+        let body = ready_command_body_with_identity(SocketType::Dealer, b"dealer-id");
+        let metadata = ZmtpMetadata::decode_ready(&body).unwrap();
+        assert_eq!(metadata.get("Socket-Type"), Some(&b"DEALER"[..]));
+        assert_eq!(metadata.get("Identity"), Some(&b"dealer-id"[..]));
     }
 }

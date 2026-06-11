@@ -289,7 +289,16 @@ impl FfiMessageInner {
         let more = message.more();
         let routing_id = message.routing_id();
         let group = message.group().and_then(|group| CString::new(group).ok());
-        let metadata = if routing_id == 0 {
+        let metadata = if let Some(routing_id) = message.metadata("Routing-Id") {
+            CString::new(routing_id)
+                .ok()
+                .map_or_else(Vec::new, |value| {
+                    vec![(
+                        CString::new("Routing-Id").expect("static metadata key has no NUL"),
+                        value,
+                    )]
+                })
+        } else if routing_id == 0 {
             Vec::new()
         } else {
             vec![(
