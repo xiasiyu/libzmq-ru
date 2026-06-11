@@ -2260,6 +2260,7 @@ impl Socket {
                         return tcp_disconnect_message_or_error(
                             &mut tcp,
                             &options.disconnect_msg,
+                            &options.hiccup_msg,
                             error,
                         )
                     }
@@ -2277,6 +2278,7 @@ impl Socket {
                         return tcp_disconnect_message_or_error(
                             &mut tcp,
                             &options.disconnect_msg,
+                            &options.hiccup_msg,
                             error,
                         )
                     }
@@ -2293,6 +2295,7 @@ impl Socket {
                     return tcp_disconnect_message_or_error(
                         &mut tcp,
                         &options.disconnect_msg,
+                        &options.hiccup_msg,
                         error,
                     )
                 }
@@ -2557,6 +2560,7 @@ impl Socket {
                         return ipc_disconnect_message_or_error(
                             &mut ipc,
                             &options.disconnect_msg,
+                            &options.hiccup_msg,
                             error,
                         )
                     }
@@ -2574,6 +2578,7 @@ impl Socket {
                         return ipc_disconnect_message_or_error(
                             &mut ipc,
                             &options.disconnect_msg,
+                            &options.hiccup_msg,
                             error,
                         )
                     }
@@ -2590,6 +2595,7 @@ impl Socket {
                     return ipc_disconnect_message_or_error(
                         &mut ipc,
                         &options.disconnect_msg,
+                        &options.hiccup_msg,
                         error,
                     )
                 }
@@ -3937,13 +3943,19 @@ fn send_tcp_probe_router(
 fn tcp_disconnect_message_or_error(
     tcp: &mut TcpState,
     disconnect_msg: &[u8],
+    hiccup_msg: &[u8],
     error: Error,
 ) -> Result<Message> {
-    if disconnect_msg.is_empty() {
+    let data = if disconnect_msg.is_empty() {
+        hiccup_msg
+    } else {
+        disconnect_msg
+    };
+    if data.is_empty() {
         return Err(error);
     }
     reset_tcp_stream_state(tcp);
-    Ok(Message::from_vec(disconnect_msg.to_vec()))
+    Ok(Message::from_vec(data.to_vec()))
 }
 
 fn reset_tcp_stream_state(tcp: &mut TcpState) {
@@ -4168,13 +4180,19 @@ fn send_ipc_probe_router(
 fn ipc_disconnect_message_or_error(
     ipc: &mut IpcState,
     disconnect_msg: &[u8],
+    hiccup_msg: &[u8],
     error: Error,
 ) -> Result<Message> {
-    if disconnect_msg.is_empty() {
+    let data = if disconnect_msg.is_empty() {
+        hiccup_msg
+    } else {
+        disconnect_msg
+    };
+    if data.is_empty() {
         return Err(error);
     }
     reset_ipc_stream_state(ipc);
-    Ok(Message::from_vec(disconnect_msg.to_vec()))
+    Ok(Message::from_vec(data.to_vec()))
 }
 
 fn reset_ipc_stream_state(ipc: &mut IpcState) {
