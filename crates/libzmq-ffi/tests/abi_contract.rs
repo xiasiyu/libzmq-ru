@@ -556,6 +556,37 @@ fn tcp_ready_identity_is_exposed_as_routing_id_metadata() {
 }
 
 #[test]
+fn tcp_hello_msg_delivers_before_first_payload_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+
+    assert_eq!(
+        zmq_setsockopt(client, ZMQ_HELLO_MSG, b"hello".as_ptr().cast(), 5),
+        0
+    );
+
+    let endpoint =
+        std::ffi::CString::new(format!("tcp://127.0.0.1:{}", unused_tcp_port())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_send(client, b"payload".as_ptr().cast(), 7, 0), 7);
+
+    let mut buffer = [0u8; 16];
+    assert_eq!(recv_retry(server, &mut buffer), 5);
+    assert_eq!(&buffer[..5], b"hello");
+    assert_eq!(recv_retry(server, &mut buffer), 7);
+    assert_eq!(&buffer[..7], b"payload");
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
 fn pair_ws_round_trip_over_c_abi() {
     let ctx = zmq_ctx_new();
     assert!(!ctx.is_null());
@@ -1597,6 +1628,48 @@ fn ipc_ready_identity_is_exposed_as_routing_id_metadata() {
     assert_eq!(zmq_msg_close(&mut inbound), 0);
     assert_eq!(zmq_close(dealer), 0);
     assert_eq!(zmq_close(router), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+    let _ = std::fs::remove_file(path);
+}
+
+#[cfg(unix)]
+#[test]
+fn ipc_hello_msg_delivers_before_first_payload_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let server = zmq_socket(ctx, ZMQ_PAIR);
+    let client = zmq_socket(ctx, ZMQ_PAIR);
+    assert!(!server.is_null());
+    assert!(!client.is_null());
+
+    assert_eq!(
+        zmq_setsockopt(client, ZMQ_HELLO_MSG, b"hello".as_ptr().cast(), 5),
+        0
+    );
+    let path = std::env::temp_dir().join(format!(
+        "libzmq-c-ipc-{}-hello-msg.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let endpoint = std::ffi::CString::new(format!("ipc://{}", path.display())).unwrap();
+    assert_eq!(zmq_bind(server, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(client, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_send(client, b"payload".as_ptr().cast(), 7, 0), 7);
+
+    let mut buffer = [0u8; 16];
+    assert_eq!(
+        zmq_recv(server, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        5
+    );
+    assert_eq!(&buffer[..5], b"hello");
+    assert_eq!(
+        zmq_recv(server, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        7
+    );
+    assert_eq!(&buffer[..7], b"payload");
+
+    assert_eq!(zmq_close(client), 0);
+    assert_eq!(zmq_close(server), 0);
     assert_eq!(zmq_ctx_term(ctx), 0);
     let _ = std::fs::remove_file(path);
 }

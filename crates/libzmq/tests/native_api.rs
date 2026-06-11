@@ -129,6 +129,25 @@ fn native_pair_tcp_round_trip() {
 }
 
 #[test]
+fn native_pair_tcp_hello_msg_delivers_before_first_payload() {
+    let port = unused_tcp_port();
+    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    client.set_option_bytes(ZMQ_HELLO_MSG, b"hello").unwrap();
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    assert_eq!(client.send("payload").unwrap(), 7);
+    let received = recv_retry_native(&server).unwrap();
+    assert_eq!(received.data(), b"hello");
+    let received = recv_retry_native(&server).unwrap();
+    assert_eq!(received.data(), b"payload");
+}
+
+#[test]
 fn native_pair_ws_round_trip() {
     let port = unused_tcp_port();
     let endpoint = format!("ws://127.0.0.1:{port}/zmq");
@@ -831,6 +850,31 @@ fn native_pair_ipc_round_trip() {
     assert_eq!(server.send("world").unwrap(), 5);
     let received = client.recv().unwrap();
     assert_eq!(received.data(), b"world");
+    let _ = std::fs::remove_file(path);
+}
+
+#[cfg(unix)]
+#[test]
+fn native_pair_ipc_hello_msg_delivers_before_first_payload() {
+    let path = std::env::temp_dir().join(format!(
+        "libzmq-native-ipc-{}-hello-msg.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let endpoint = format!("ipc://{}", path.display());
+    let ctx = Context::new().unwrap();
+    let server = ctx.socket(SocketType::Pair).unwrap();
+    let client = ctx.socket(SocketType::Pair).unwrap();
+
+    client.set_option_bytes(ZMQ_HELLO_MSG, b"hello").unwrap();
+    server.bind(&endpoint).unwrap();
+    client.connect(&endpoint).unwrap();
+
+    assert_eq!(client.send("payload").unwrap(), 7);
+    let received = server.recv().unwrap();
+    assert_eq!(received.data(), b"hello");
+    let received = server.recv().unwrap();
+    assert_eq!(received.data(), b"payload");
     let _ = std::fs::remove_file(path);
 }
 

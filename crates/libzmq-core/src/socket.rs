@@ -148,6 +148,7 @@ struct TcpState {
     peer_greeting_done: bool,
     peer_ready: bool,
     peer_identity: Option<Vec<u8>>,
+    hello_sent: bool,
     curve_session: Option<CurveSession>,
     gssapi_session: Option<GssapiSession>,
 }
@@ -162,6 +163,7 @@ struct IpcState {
     peer_greeting_done: bool,
     peer_ready: bool,
     peer_identity: Option<Vec<u8>>,
+    hello_sent: bool,
     curve_session: Option<CurveSession>,
     gssapi_session: Option<GssapiSession>,
 }
@@ -2001,6 +2003,7 @@ impl Socket {
         tcp.peer_greeting_done = false;
         tcp.peer_ready = false;
         tcp.peer_identity = None;
+        tcp.hello_sent = false;
         tcp.curve_session = None;
         tcp.gssapi_session = None;
         self.emit_monitor_event(ZMQ_EVENT_LISTENING, 0, endpoint)?;
@@ -2021,6 +2024,7 @@ impl Socket {
         tcp.peer_greeting_done = false;
         tcp.peer_ready = false;
         tcp.peer_identity = None;
+        tcp.hello_sent = false;
         tcp.curve_session = None;
         tcp.gssapi_session = None;
         self.emit_monitor_event(ZMQ_EVENT_CLOSED, 0, endpoint)?;
@@ -2052,6 +2056,7 @@ impl Socket {
         tcp.peer_greeting_done = false;
         tcp.peer_ready = false;
         tcp.peer_identity = None;
+        tcp.hello_sent = false;
         tcp.curve_session = None;
         tcp.gssapi_session = None;
         self.emit_monitor_event(ZMQ_EVENT_CONNECTED, 0, endpoint)?;
@@ -2072,6 +2077,7 @@ impl Socket {
         tcp.peer_greeting_done = false;
         tcp.peer_ready = false;
         tcp.peer_identity = None;
+        tcp.hello_sent = false;
         tcp.curve_session = None;
         tcp.gssapi_session = None;
         self.emit_monitor_event(ZMQ_EVENT_DISCONNECTED, 0, endpoint)?;
@@ -2101,6 +2107,7 @@ impl Socket {
                         tcp.peer_greeting_done = false;
                         tcp.peer_ready = false;
                         tcp.peer_identity = None;
+                        tcp.hello_sent = false;
                         tcp.curve_session = None;
                         tcp.gssapi_session = None;
                     }
@@ -2157,6 +2164,13 @@ impl Socket {
             tcp.gssapi_session = handshake.gssapi_session;
             tcp.handshake_started = true;
         }
+        let hello_msg = self
+            .options
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .hello_msg
+            .clone();
+        send_tcp_hello_message(&mut tcp, &hello_msg)?;
         if let Some(session) = tcp.curve_session.as_mut() {
             let frame = curve_message_frame(session, message.data(), message.more())?;
             let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
@@ -2218,6 +2232,13 @@ impl Socket {
             tcp.peer_identity = metadata.get("Identity").map(ToOwned::to_owned);
             tcp.peer_ready = true;
         }
+        let hello_msg = self
+            .options
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .hello_msg
+            .clone();
+        send_tcp_hello_message(&mut tcp, &hello_msg)?;
         loop {
             if tcp.curve_session.is_some() {
                 let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
@@ -2260,6 +2281,7 @@ impl Socket {
         ipc.peer_greeting_done = false;
         ipc.peer_ready = false;
         ipc.peer_identity = None;
+        ipc.hello_sent = false;
         ipc.curve_session = None;
         ipc.gssapi_session = None;
         self.emit_monitor_event(ZMQ_EVENT_LISTENING, 0, endpoint)?;
@@ -2280,6 +2302,7 @@ impl Socket {
         ipc.peer_greeting_done = false;
         ipc.peer_ready = false;
         ipc.peer_identity = None;
+        ipc.hello_sent = false;
         ipc.curve_session = None;
         ipc.gssapi_session = None;
         let _ = std::fs::remove_file(parsed.path());
@@ -2301,6 +2324,7 @@ impl Socket {
         ipc.peer_greeting_done = false;
         ipc.peer_ready = false;
         ipc.peer_identity = None;
+        ipc.hello_sent = false;
         ipc.curve_session = None;
         ipc.gssapi_session = None;
         self.emit_monitor_event(ZMQ_EVENT_CONNECTED, 0, endpoint)?;
@@ -2363,6 +2387,7 @@ impl Socket {
                     ipc.peer_greeting_done = false;
                     ipc.peer_ready = false;
                     ipc.peer_identity = None;
+                    ipc.hello_sent = false;
                     ipc.curve_session = None;
                     ipc.gssapi_session = None;
                 }
@@ -2405,6 +2430,13 @@ impl Socket {
             ipc.gssapi_session = handshake.gssapi_session;
             ipc.handshake_started = true;
         }
+        let hello_msg = self
+            .options
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .hello_msg
+            .clone();
+        send_ipc_hello_message(&mut ipc, &hello_msg)?;
         if let Some(session) = ipc.curve_session.as_mut() {
             let frame = curve_message_frame(session, message.data(), message.more())?;
             let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
@@ -2466,6 +2498,13 @@ impl Socket {
             ipc.peer_identity = metadata.get("Identity").map(ToOwned::to_owned);
             ipc.peer_ready = true;
         }
+        let hello_msg = self
+            .options
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?
+            .hello_msg
+            .clone();
+        send_ipc_hello_message(&mut ipc, &hello_msg)?;
         loop {
             if ipc.curve_session.is_some() {
                 let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
@@ -3800,6 +3839,34 @@ fn read_zmtp_peer_ready_tcp(stream: &mut TcpStreamHandle) -> Result<ZmtpMetadata
     }
 }
 
+fn send_tcp_hello_message(tcp: &mut TcpState, hello_msg: &[u8]) -> Result<()> {
+    if tcp.hello_sent || hello_msg.is_empty() {
+        return Ok(());
+    }
+    if tcp.curve_session.is_some() {
+        let frame = {
+            let session = tcp.curve_session.as_mut().ok_or(Error::InvalidSocket)?;
+            curve_message_frame(session, hello_msg, false)?
+        };
+        let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
+        stream.write_all(&frame).map_err(map_io_error)?;
+    } else if tcp.gssapi_session.is_some() {
+        let frame = {
+            let session = tcp.gssapi_session.as_mut().ok_or(Error::InvalidSocket)?;
+            gssapi_message_frame(session, hello_msg, false)?
+        };
+        let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
+        stream.write_all(&frame).map_err(map_io_error)?;
+    } else {
+        let stream = tcp.stream.as_mut().ok_or(Error::Again)?;
+        stream
+            .write_all(&ZmtpFrame::message(hello_msg.to_vec()).encode_v3())
+            .map_err(map_io_error)?;
+    }
+    tcp.hello_sent = true;
+    Ok(())
+}
+
 fn read_zmtp_greeting_tcp(stream: &mut TcpStreamHandle) -> Result<()> {
     let mut greeting = [0u8; 64];
     stream.read_exact(&mut greeting).map_err(map_io_error)?;
@@ -3956,6 +4023,34 @@ fn read_zmtp_peer_ready_ipc(stream: &mut IpcStreamHandle) -> Result<ZmtpMetadata
             return ZmtpMetadata::decode_ready(frame.body());
         }
     }
+}
+
+fn send_ipc_hello_message(ipc: &mut IpcState, hello_msg: &[u8]) -> Result<()> {
+    if ipc.hello_sent || hello_msg.is_empty() {
+        return Ok(());
+    }
+    if ipc.curve_session.is_some() {
+        let frame = {
+            let session = ipc.curve_session.as_mut().ok_or(Error::InvalidSocket)?;
+            curve_message_frame(session, hello_msg, false)?
+        };
+        let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
+        stream.write_all(&frame).map_err(map_io_error)?;
+    } else if ipc.gssapi_session.is_some() {
+        let frame = {
+            let session = ipc.gssapi_session.as_mut().ok_or(Error::InvalidSocket)?;
+            gssapi_message_frame(session, hello_msg, false)?
+        };
+        let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
+        stream.write_all(&frame).map_err(map_io_error)?;
+    } else {
+        let stream = ipc.stream.as_mut().ok_or(Error::Again)?;
+        stream
+            .write_all(&ZmtpFrame::message(hello_msg.to_vec()).encode_v3())
+            .map_err(map_io_error)?;
+    }
+    ipc.hello_sent = true;
+    Ok(())
 }
 
 fn read_zmtp_greeting_ipc(stream: &mut IpcStreamHandle) -> Result<()> {
