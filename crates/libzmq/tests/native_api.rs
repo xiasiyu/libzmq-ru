@@ -1420,6 +1420,36 @@ fn native_xpub_replays_xsub_subscription_and_sends_welcome() {
 }
 
 #[test]
+fn native_xpub_manual_last_value_delivers_to_last_subscriber() {
+    let ctx = Context::new().unwrap();
+    let publisher = ctx.socket(SocketType::Xpub).unwrap();
+    let sub1 = ctx.socket(SocketType::Xsub).unwrap();
+    let sub2 = ctx.socket(SocketType::Xsub).unwrap();
+
+    publisher
+        .set_option_i32(ZMQ_XPUB_MANUAL_LAST_VALUE, 1)
+        .unwrap();
+    publisher.bind("inproc://native_xpub_manual_last").unwrap();
+    sub1.connect("inproc://native_xpub_manual_last").unwrap();
+    sub2.connect("inproc://native_xpub_manual_last").unwrap();
+
+    sub1.subscribe(b"topic").unwrap();
+    assert_eq!(publisher.recv().unwrap().data(), b"\x01topic");
+    publisher.subscribe(b"topic").unwrap();
+
+    sub2.subscribe(b"topic").unwrap();
+    assert_eq!(publisher.recv().unwrap().data(), b"\x01topic");
+    publisher.subscribe(b"topic").unwrap();
+
+    publisher.send("topic").unwrap();
+    publisher.send("topic").unwrap();
+
+    assert_eq!(sub2.recv().unwrap().data(), b"topic");
+    assert_eq!(sub2.recv().unwrap().data(), b"topic");
+    assert_eq!(sub1.recv().unwrap().data(), b"topic");
+}
+
+#[test]
 fn native_stream_inproc_round_trip() {
     let ctx = Context::new().unwrap();
     let server = ctx.socket(SocketType::Stream).unwrap();

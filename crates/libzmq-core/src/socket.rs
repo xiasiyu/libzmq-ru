@@ -1377,18 +1377,22 @@ impl Socket {
             ZMQ_XPUB_NODROP => options.xpub_nodrop = value != 0,
             ZMQ_XPUB_MANUAL => {
                 options.xpub_manual = value != 0;
-                self.xpub_subscription_policy
+                let mut policy = self
+                    .xpub_subscription_policy
                     .lock()
-                    .map_err(|_| Error::InvalidSocket)?
-                    .manual = value != 0;
+                    .map_err(|_| Error::InvalidSocket)?;
+                policy.manual = value != 0;
+                policy.manual_last_value = false;
             }
             ZMQ_XPUB_MANUAL_LAST_VALUE if self.socket_type == SocketType::Xpub && value >= 0 => {
                 options.xpub_manual = value != 0;
                 options.xpub_manual_last_value = value != 0;
-                self.xpub_subscription_policy
+                let mut policy = self
+                    .xpub_subscription_policy
                     .lock()
-                    .map_err(|_| Error::InvalidSocket)?
-                    .manual = value != 0;
+                    .map_err(|_| Error::InvalidSocket)?;
+                policy.manual = value != 0;
+                policy.manual_last_value = value != 0;
             }
             ZMQ_ONLY_FIRST_SUBSCRIBE
                 if matches!(self.socket_type, SocketType::Xpub | SocketType::Xsub)

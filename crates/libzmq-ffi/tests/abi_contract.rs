@@ -2984,6 +2984,93 @@ fn xpub_manual_accepts_last_subscription_over_c_abi() {
 }
 
 #[test]
+fn xpub_manual_last_value_delivers_to_last_subscriber_over_c_abi() {
+    let ctx = zmq_ctx_new();
+    assert!(!ctx.is_null());
+    let publisher = zmq_socket(ctx, ZMQ_XPUB);
+    let sub1 = zmq_socket(ctx, ZMQ_XSUB);
+    let sub2 = zmq_socket(ctx, ZMQ_XSUB);
+    assert!(!publisher.is_null());
+    assert!(!sub1.is_null());
+    assert!(!sub2.is_null());
+
+    let value = 1;
+    assert_eq!(
+        zmq_setsockopt(
+            publisher,
+            ZMQ_XPUB_MANUAL_LAST_VALUE,
+            (&value as *const c_int).cast(),
+            size_of::<c_int>()
+        ),
+        0
+    );
+    let endpoint = c"inproc://c_xpub_manual_last_value";
+    assert_eq!(zmq_bind(publisher, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(sub1, endpoint.as_ptr()), 0);
+    assert_eq!(zmq_connect(sub2, endpoint.as_ptr()), 0);
+
+    let topic = b"topic";
+    let mut buffer = [0u8; 8];
+    assert_eq!(
+        zmq_setsockopt(sub1, ZMQ_SUBSCRIBE, topic.as_ptr().cast(), topic.len()),
+        0
+    );
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        1 + topic.len() as c_int
+    );
+    assert_eq!(&buffer[..1 + topic.len()], b"\x01topic");
+    assert_eq!(
+        zmq_setsockopt(publisher, ZMQ_SUBSCRIBE, topic.as_ptr().cast(), topic.len()),
+        0
+    );
+
+    assert_eq!(
+        zmq_setsockopt(sub2, ZMQ_SUBSCRIBE, topic.as_ptr().cast(), topic.len()),
+        0
+    );
+    assert_eq!(
+        zmq_recv(publisher, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        1 + topic.len() as c_int
+    );
+    assert_eq!(&buffer[..1 + topic.len()], b"\x01topic");
+    assert_eq!(
+        zmq_setsockopt(publisher, ZMQ_SUBSCRIBE, topic.as_ptr().cast(), topic.len()),
+        0
+    );
+
+    assert_eq!(
+        zmq_send(publisher, topic.as_ptr().cast(), topic.len(), 0),
+        topic.len() as c_int
+    );
+    assert_eq!(
+        zmq_send(publisher, topic.as_ptr().cast(), topic.len(), 0),
+        topic.len() as c_int
+    );
+
+    assert_eq!(
+        zmq_recv(sub2, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        topic.len() as c_int
+    );
+    assert_eq!(&buffer[..topic.len()], topic);
+    assert_eq!(
+        zmq_recv(sub2, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        topic.len() as c_int
+    );
+    assert_eq!(&buffer[..topic.len()], topic);
+    assert_eq!(
+        zmq_recv(sub1, buffer.as_mut_ptr().cast(), buffer.len(), 0),
+        topic.len() as c_int
+    );
+    assert_eq!(&buffer[..topic.len()], topic);
+
+    assert_eq!(zmq_close(sub2), 0);
+    assert_eq!(zmq_close(sub1), 0);
+    assert_eq!(zmq_close(publisher), 0);
+    assert_eq!(zmq_ctx_term(ctx), 0);
+}
+
+#[test]
 fn xpub_receives_unsubscribe_when_xsub_disconnects_over_c_abi() {
     let ctx = zmq_ctx_new();
     assert!(!ctx.is_null());

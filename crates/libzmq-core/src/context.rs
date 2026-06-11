@@ -31,6 +31,7 @@ pub(crate) struct XpubSubscriptionPolicyState {
     pub(crate) verbose_subscribe: bool,
     pub(crate) verbose_unsubscribe: bool,
     pub(crate) manual: bool,
+    pub(crate) manual_last_value: bool,
 }
 
 #[derive(Debug)]
@@ -290,14 +291,13 @@ impl InprocEndpoint {
 
     pub(crate) fn matching_peers(&self, message: &Message) -> Result<Vec<MessageQueue>> {
         let peers = self.peers.lock().map_err(|_| Error::InvalidSocket)?;
-        let manual_xpub = self.binder_type == SocketType::Xpub
-            && self
-                .binder_xpub_policy
-                .lock()
-                .map_err(|_| Error::InvalidSocket)?
-                .manual;
+        let policy = *self
+            .binder_xpub_policy
+            .lock()
+            .map_err(|_| Error::InvalidSocket)?;
+        let manual_xpub = self.binder_type == SocketType::Xpub && policy.manual;
         let manual_matches = if manual_xpub {
-            Some(self.manual_matching_peer_ids(message)?)
+            Some(self.manual_matching_peer_ids(message, policy.manual_last_value)?)
         } else {
             None
         };
@@ -315,11 +315,34 @@ impl InprocEndpoint {
         Ok(outboxes)
     }
 
-    fn manual_matching_peer_ids(&self, message: &Message) -> Result<HashSet<usize>> {
+    fn manual_matching_peer_ids(
+        &self,
+        message: &Message,
+        manual_last_value: bool,
+    ) -> Result<HashSet<usize>> {
         let topics = self
             .xpub_manual_topics
             .lock()
             .map_err(|_| Error::InvalidSocket)?;
+        if manual_last_value {
+            let last_peer = self
+                .xpub_last_peer
+                .lock()
+                .map_err(|_| Error::InvalidSocket)?
+                .take();
+            if let Some(last_peer) = last_peer {
+                let mut ids = HashSet::new();
+                for (prefix, peers) in topics.iter() {
+                    if peers.contains(&last_peer)
+                        && prefix.len() <= message.len()
+                        && message.data().starts_with(prefix)
+                    {
+                        ids.insert(last_peer);
+                    }
+                }
+                return Ok(ids);
+            }
+        }
         let mut ids = HashSet::new();
         for (prefix, peers) in topics.iter() {
             if prefix.len() <= message.len() && message.data().starts_with(prefix) {
